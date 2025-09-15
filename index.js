@@ -87,7 +87,7 @@ const { Client, Databases, ID } = require('node-appwrite');
             receipt: orderOptions.receipt,
             razorpay_order_id: razorOrder.id,
             status: 'created',
-            createdAt: new Date().toISOString(),
+            $createdAt: new Date().toISOString(),
         };
 
         console.log(JSON.stringify({ info: 'creating appwrite order doc', localOrder }));
