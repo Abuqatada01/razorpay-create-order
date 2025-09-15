@@ -1,10 +1,11 @@
 // index.js (create-order)
+require("dotenv").config();
 const Razorpay = require("razorpay");
 const { Client, Databases, ID } = require("node-appwrite");
 
 (async function main() {
     try {
-        console.log("create-order: start");
+        console.log(process.env.RAZORPAY_KEY_ID);
 
         // Read function payload (Appwrite sets APPWRITE_FUNCTION_DATA)
         let payload = {};
