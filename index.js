@@ -6,7 +6,19 @@ const { Client, Databases, ID } = require('node-appwrite');
 (async function main() {
     try {
         // Parse payload
+
         let payload = {};
+        console.log(JSON.stringify({
+            debug: 'environment check',
+            hasRazorpayId: !!process.env.RAZORPAY_KEY_ID,
+            hasRazorpaySecret: !!process.env.RAZORPAY_KEY_SECRET,
+            hasAppwriteEndpoint: !!process.env.APPWRITE_ENDPOINT,
+            hasAppwriteProject: !!process.env.APPWRITE_PROJECT_ID,
+            hasAppwriteApiKey: !!process.env.APPWRITE_API_KEY,
+            hasDatabaseId: !!process.env.APPWRITE_DATABASE_ID,
+            hasOrdersCollection: !!process.env.APPWRITE_ORDERS_COLLECTION_ID,
+            payload
+        }));
         if (process.env.APPWRITE_FUNCTION_DATA) {
             try {
                 payload = JSON.parse(process.env.APPWRITE_FUNCTION_DATA);
@@ -87,7 +99,7 @@ const { Client, Databases, ID } = require('node-appwrite');
             receipt: orderOptions.receipt,
             razorpay_order_id: razorOrder.id,
             status: 'created',
-            $createdAt: new Date().toISOString(),
+            // $createdAt: new Date().toISOString(),
         };
 
         console.log(JSON.stringify({ info: 'creating appwrite order doc', localOrder }));
