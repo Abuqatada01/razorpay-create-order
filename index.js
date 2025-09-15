@@ -1,65 +1,94 @@
-// index.js (create-order function)
-const Razorpay = require('razorpay');
-const sdk = require('node-appwrite');
+// index.js (create-order)
+const Razorpay = require("razorpay");
+const { Client, Databases, ID } = require("node-appwrite");
 
-module.exports = async function (req, res) {
+(async function main() {
     try {
-        // incoming payload is a JSON string in req.payload (Appwrite function)
-        const payload = req.payload ? JSON.parse(req.payload) : {};
-        const { amount /* rupees */, currency = 'INR', receipt, userId, items } = payload;
+        console.log("create-order: start");
 
-        if (!amount || !userId) {
-            return res.json({ success: false, message: 'amount and userId required' }, 400);
+        // Read function payload (Appwrite sets APPWRITE_FUNCTION_DATA)
+        let payload = {};
+        try {
+            if (process.env.APPWRITE_FUNCTION_DATA) {
+                payload = JSON.parse(process.env.APPWRITE_FUNCTION_DATA);
+            }
+        } catch (err) {
+            console.error("Failed to parse APPWRITE_FUNCTION_DATA:", err);
         }
 
-        // Initialize Razorpay
-        const razorpay = new Razorpay({
-            key_id: rzp_test_RH8HdkZbA9xnoK,
-            key_secret: V2OIX2UM8B6CGlxk0UjzQmk1,
-        });
+        const { amount, currency = "INR", receipt, userId, items } = payload;
 
-        // Razorpay requires amount in paise
-        const amountPaise = Math.round(amount * 100);
+        if (!amount || !userId) {
+            console.log(JSON.stringify({ success: false, message: "amount and userId required", payload }));
+            process.exit(1);
+        }
+
+        // Env vars (set these in Function settings)
+        const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
+        const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+
+        const APPWRITE_ENDPOINT = process.env.APPWRITE_FUNCTION_ENDPOINT || process.env.APPWRITE_ENDPOINT;
+        const APPWRITE_PROJECT = process.env.APPWRITE_FUNCTION_PROJECT_ID || process.env.APPWRITE_PROJECT_ID;
+        const APPWRITE_API_KEY = process.env.APPWRITE_FUNCTION_API_KEY || process.env.APPWRITE_API_KEY;
+
+        const DATABASE_ID = process.env.APPWRITE_DATABASE_ID;
+        const ORDERS_COLLECTION_ID = process.env.APPWRITE_ORDERS_COLLECTION_ID;
+
+        if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET) {
+            throw new Error("Missing Razorpay keys");
+        }
+        if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT || !APPWRITE_API_KEY) {
+            throw new Error("Missing Appwrite server config");
+        }
+        if (!DATABASE_ID || !ORDERS_COLLECTION_ID) {
+            throw new Error("Missing database/collection IDs");
+        }
+
+        // Create Razorpay order
+        const razor = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET });
+        const amountPaise = Math.round(Number(amount) * 100);
 
         const orderOptions = {
             amount: amountPaise,
             currency,
             receipt: receipt || `rcpt_${Date.now()}`,
-            payment_capture: 1, // 1 to auto-capture
+            payment_capture: 1,
+            notes: { appwriteUserId: userId },
         };
 
-        // create razorpay order
-        const razorOrder = await razorpay.orders.create(orderOptions);
+        console.log("Creating Razorpay order:", orderOptions);
+        const razorOrder = await razor.orders.create(orderOptions);
+        console.log("Razorpay order created:", razorOrder && razorOrder.id);
 
-        // Initialize Appwrite client (use function API key set in env)
-        const client = new sdk.Client()
-            .setEndpoint(process.env.APPWRITE_FUNCTION_ENDPOINT || process.env.APPWRITE_ENDPOINT)
-            .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID || process.env.APPWRITE_PROJECT_ID)
-            .setKey(process.env.APPWRITE_FUNCTION_API_KEY || process.env.APPWRITE_API_KEY);
+        // Initialize Appwrite server SDK
+        const client = new Client()
+            .setEndpoint(APPWRITE_ENDPOINT)
+            .setProject(APPWRITE_PROJECT)
+            .setKey(APPWRITE_API_KEY);
 
-        const databases = new sdk.Databases(client);
+        const databases = new Databases(client);
 
-        // create an orders document in Appwrite
-        const orderDoc = await databases.createDocument(
-            process.env.APPWRITE_DATABASE_ID,
-            process.env.APPWRITE_ORDERS_COLLECTION_ID,
-            sdk.ID.unique(),
-            {
-                userId,
-                items: items || [],
-                amount,
-                currency,
-                receipt: orderOptions.receipt,
-                razorpay_order_id: razorOrder.id,
-                status: 'created',
-                createdAt: new Date().toISOString(),
-            }
-        );
+        const localOrder = {
+            userId,
+            items: items || [],
+            amount,
+            amountPaise,
+            currency,
+            receipt: orderOptions.receipt,
+            razorpay_order_id: razorOrder.id,
+            status: "created",
+            createdAt: new Date().toISOString(),
+        };
 
-        // Return razorpay order and local order id to client
-        return res.json({ success: true, razorOrder, localOrderId: orderDoc.$id });
+        const orderDoc = await databases.createDocument(DATABASE_ID, ORDERS_COLLECTION_ID, ID.unique(), localOrder);
+        console.log("Appwrite order doc created", orderDoc.$id);
+
+        const out = { success: true, razorOrder, localOrderId: orderDoc.$id };
+        console.log(JSON.stringify(out));
+        process.exit(0);
     } catch (err) {
-        console.error('create-order error', err);
-        return res.json({ success: false, message: err.message || err.toString() }, 500);
+        console.error("create-order error:", err && (err.stack || err.message || err));
+        console.log(JSON.stringify({ success: false, message: String(err && err.message ? err.message : err) }));
+        process.exit(1);
     }
-};
+})();
