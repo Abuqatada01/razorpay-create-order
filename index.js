@@ -143,7 +143,7 @@ export default async ({ req, res, log, error }) => {
                     items: itemsForDb,     // ["Product Name (Size: 30)"]
                     size: sizeForDb,       // "30" (single string) or null
                     items_json: itemsJson, // full structured backup
-                    createdAt: new Date().toISOString(),
+                    // $createdAt: new Date().toISOString(),
                 }
             );
 
