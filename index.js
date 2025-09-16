@@ -18,8 +18,7 @@ export default async ({ req, res, log, error }) => {
             key_id: process.env.RAZORPAY_KEY_ID,
             key_secret: process.env.RAZORPAY_KEY_SECRET,
         });
-        const { userId, items = [], amount, currency = "INR" } = bodyData;
-        log("Incoming order payload:", { userId, amount, currency, items });
+
         if (req.method === "POST") {
             log("📩 POST request received for Razorpay order");
 
