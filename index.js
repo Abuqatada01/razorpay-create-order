@@ -132,7 +132,7 @@ export default async ({ req, res, log, error }) => {
                     items: itemsForDb,     // "Product Name (Size: 32)"
                     size: sizesForDb,     // ["32"]
                     items_json: itemsJson, // full backup
-                    createdAt: new Date().toISOString(),
+                    // createdAt: new Date().toISOString(),
                 }
             );
 
