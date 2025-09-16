@@ -18,7 +18,8 @@ export default async ({ req, res, log, error }) => {
             key_id: process.env.RAZORPAY_KEY_ID,
             key_secret: process.env.RAZORPAY_KEY_SECRET,
         });
-
+        const { userId, items = [], amount, currency = "INR" } = bodyData;
+        log("Incoming order payload:", { userId, amount, currency, items });
         if (req.method === "POST") {
             log("📩 POST request received for Razorpay order");
 
@@ -60,8 +61,8 @@ export default async ({ req, res, log, error }) => {
             // ✅ Save order in Appwrite DB (do NOT block response)
             databases
                 .createDocument(
-                    "68c414290032f31187eb", // Database ID
-                    "68c58bfe0001e9581bd4", // Orders collection
+                    "68c414290032f31187eb",
+                    "68c58bfe0001e9581bd4",
                     ID.unique(),
                     {
                         userId,
@@ -73,14 +74,13 @@ export default async ({ req, res, log, error }) => {
                         razorpay_signature: null,
                         status: "unpaid",
                         receipt: order.receipt,
-                        items,
-                        items_json: JSON.stringify(items),
+                        items: items || [],
+                        items_json: JSON.stringify(items || []),
                         verification_raw: null,
                     }
                 )
                 .then(() => log("✅ Order saved in DB"))
                 .catch((err) => error("❌ Failed to save order: " + err.message));
-
             // ✅ Respond immediately (frontend needs this)
             return res.json({
                 success: true,
