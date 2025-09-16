@@ -1,17 +1,30 @@
-// createOrder.js (Appwrite Function - updated)
+// createOrder.js (Appwrite Function - with external-call timeout)
 import Razorpay from "razorpay";
 import { Client, Databases, ID } from "node-appwrite";
 
+const promiseWithTimeout = (p, ms, timeoutMessage = "Operation timed out") =>
+    new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(timeoutMessage)), ms);
+        p
+            .then((res) => {
+                clearTimeout(timer);
+                resolve(res);
+            })
+            .catch((err) => {
+                clearTimeout(timer);
+                reject(err);
+            });
+    });
+
 export default async ({ req, res, log, error }) => {
     try {
-        log("⚡ Razorpay Create-Order Function execution started");
+        log("⚡ Razorpay Create-Order Function started");
 
         // Appwrite client
         const client = new Client()
             .setEndpoint("https://fra.cloud.appwrite.io/v1")
             .setProject("684c05fe002863accd73")
             .setKey(req.headers["x-appwrite-key"] || "");
-
         const databases = new Databases(client);
 
         // Razorpay client
@@ -25,45 +38,27 @@ export default async ({ req, res, log, error }) => {
             return res.json({ success: false, message: `Method ${req.method} not allowed` }, 405);
         }
 
-        log("📩 POST request received for Razorpay order - attempting to parse payload");
+        log("📩 POST received - parsing payload");
 
-        // Defensive parse: Appwrite might put the payload in different properties
+        // Defensive parse
         let bodyData = {};
         try {
-            const rawCandidates = {
-                bodyRaw: req.bodyRaw,
-                payload: req.payload,
-                variables_APPWRITE_FUNCTION_DATA: req.variables?.APPWRITE_FUNCTION_DATA,
-                header_x_appwrite_function_data: req.headers?.["x-appwrite-function-data"] || null,
-            };
-            log("📥 Raw candidates (keys):", Object.keys(rawCandidates).filter(k => rawCandidates[k] != null));
+            const raw =
+                req.bodyRaw ||
+                req.payload ||
+                req.variables?.APPWRITE_FUNCTION_DATA ||
+                req.headers?.["x-appwrite-function-data"] ||
+                "{}";
 
-            // Prefer bodyRaw -> payload -> variables.APPWRITE_FUNCTION_DATA -> header
-            let raw =
-                (typeof req.bodyRaw !== "undefined" && req.bodyRaw !== null && req.bodyRaw !== "")
-                    ? req.bodyRaw
-                    : (typeof req.payload !== "undefined" && req.payload !== null && req.payload !== "")
-                        ? req.payload
-                        : req.variables?.APPWRITE_FUNCTION_DATA || req.headers?.["x-appwrite-function-data"] || "{}";
-
-            // If raw is an object already, use as-is; if string, try parse
             if (typeof raw === "string") {
-                log("📥 Raw payload string (first 400 chars):", raw.slice ? raw.slice(0, 400) : String(raw));
                 try {
                     bodyData = JSON.parse(raw || "{}");
-                } catch (e) {
-                    // If parsing fails, it might be double-stringified like: { body: "{...}" }
-                    log("⚠️ First JSON.parse failed for raw payload, attempting fallback parse.");
+                } catch {
+                    // try to handle nested stringified body
                     try {
-                        const firstParse = JSON.parse(raw);
-                        if (firstParse && typeof firstParse === "object") {
-                            bodyData = firstParse;
-                        } else {
-                            bodyData = {};
-                        }
-                    } catch (e2) {
-                        // final fallback to empty object
-                        log("⚠️ Fallback parse failed, using empty object.");
+                        const p = JSON.parse(raw);
+                        bodyData = (p && typeof p === "object") ? p : {};
+                    } catch {
                         bodyData = {};
                     }
                 }
@@ -73,38 +68,20 @@ export default async ({ req, res, log, error }) => {
                 bodyData = {};
             }
 
-            // Normalize if the payload contains a stringified "body" or "data" key (common double-stringify)
+            // Normalize double-stringified body/data if present
             if (typeof bodyData.body === "string") {
-                try {
-                    const nested = JSON.parse(bodyData.body);
-                    if (nested && typeof nested === "object") {
-                        bodyData = { ...bodyData, ...nested };
-                        log("🔁 Normalized double-stringified 'body' field into payload.");
-                    }
-                } catch (e) {
-                    // ignore if not parseable
-                }
+                try { Object.assign(bodyData, JSON.parse(bodyData.body)); } catch { }
             }
             if (typeof bodyData.data === "string") {
-                try {
-                    const nested = JSON.parse(bodyData.data);
-                    if (nested && typeof nested === "object") {
-                        bodyData = { ...bodyData, ...nested };
-                        log("🔁 Normalized double-stringified 'data' field into payload.");
-                    }
-                } catch (e) { }
+                try { Object.assign(bodyData, JSON.parse(bodyData.data)); } catch { }
             }
         } catch (parseErr) {
-            error("❌ Unexpected parsing error: " + (parseErr.message || parseErr));
-            return res.json({ success: false, message: "Invalid JSON or payload format" }, 400);
+            error("Parsing error: " + (parseErr.message || parseErr));
+            return res.json({ success: false, message: "Invalid JSON or payload" }, 400);
         }
 
-        log("🔎 Parsed payload (first 400 chars):", JSON.stringify(bodyData).slice(0, 400));
-
-        // Ensure required fields and defensive defaults
         const { userId, items = [], amount, currency = "INR" } = bodyData || {};
 
-        // Validate
         if (!userId || typeof amount === "undefined" || amount === null) {
             return res.json({ success: false, message: "userId and amount required" }, 400);
         }
@@ -114,24 +91,46 @@ export default async ({ req, res, log, error }) => {
             return res.json({ success: false, message: "Amount must be a positive number" }, 400);
         }
 
-        // Create Razorpay order
-        const order = await razorpay.orders.create({
-            amount: intAmount * 100, // paise
-            currency,
-            receipt: `order_rcpt_${Date.now()}`,
-        });
+        // Create Razorpay order with timeout (10s)
+        const CREATE_TIMEOUT_MS = 10000; // 10 seconds - adjust if necessary but keep << 30000
+
+        let order;
+        try {
+            order = await promiseWithTimeout(
+                razorpay.orders.create({
+                    amount: intAmount * 100,
+                    currency,
+                    receipt: `order_rcpt_${Date.now()}`,
+                }),
+                CREATE_TIMEOUT_MS,
+                "Razorpay order creation timed out"
+            );
+        } catch (e) {
+            // Network / timeout / Razorpay failure - respond quickly so Appwrite doesn't hit 30s limit
+            error("Razorpay create error: " + (e.message || e));
+            // helpful client error code and message
+            return res.json({ success: false, message: "Payment gateway unavailable. Please try again." }, 503);
+        }
 
         log("✅ Razorpay order created:", order?.id || "(no id)");
 
-        // Persist order in Appwrite DB (do NOT block response success returned to frontend)
-        const safeItems = Array.isArray(items) ? items : (typeof items === "string" ? (() => {
-            try { return JSON.parse(items); } catch { return []; }
-        })() : []);
+        // Persist order non-blocking
+        const safeItems = Array.isArray(items)
+            ? items
+            : typeof items === "string"
+                ? (() => {
+                    try {
+                        return JSON.parse(items);
+                    } catch {
+                        return [];
+                    }
+                })()
+                : [];
 
         databases
             .createDocument(
-                "68c414290032f31187eb", // Database ID
-                "68c58bfe0001e9581bd4", // Orders collection ID
+                "68c414290032f31187eb",
+                "68c58bfe0001e9581bd4",
                 ID.unique(),
                 {
                     userId,
@@ -150,9 +149,9 @@ export default async ({ req, res, log, error }) => {
                 }
             )
             .then(() => log("✅ Order saved in DB"))
-            .catch((err) => error("❌ Failed to save order: " + (err.message || err)));
+            .catch((err) => error("DB save failed: " + (err.message || err)));
 
-        // Respond immediately with the order details frontend needs
+        // Respond immediately with the order required by frontend
         return res.json({
             success: true,
             orderId: order.id,
