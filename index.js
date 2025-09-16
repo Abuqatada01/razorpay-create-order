@@ -170,7 +170,7 @@ export default async ({ req, res, log, error }) => {
                     items: itemsForDb,           // Appwrite-friendly String[] field
                     items_json: itemsJson,       // Full structured backup
                     verification_raw: null,
-                    createdAt: new Date().toISOString(),
+                    // createdAt: new Date().toISOString(),
                 }
             );
 
