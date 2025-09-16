@@ -49,10 +49,16 @@ export default async ({ req, res, log, error }) => {
 
             // ✅ Create Razorpay order
             const order = await razorpay.orders.create({
-                amount: intAmount * 100, // in paise
-                currency,
-                receipt: `receipt_${Date.now()}`,
+                amount: req.amount * 100, // paise
+                currency: "INR",
             });
+
+            res.json({
+                success: true,
+                amount: order.amount,
+                orderId: order.id,
+            });
+
 
             log("✅ Razorpay order created");
 
