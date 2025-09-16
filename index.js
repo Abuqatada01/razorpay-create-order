@@ -153,43 +153,47 @@ export default async ({ req, res, log, error }) => {
         // Persist order in Appwrite DB (non-blocking - we don't hold up the response)
         // -------------------------
         try {
-            databases
-                .createDocument(
-                    "68c414290032f31187eb", // Database ID - replace if needed
-                    "68c58bfe0001e9581bd4", // Orders collection ID - replace if needed
-                    ID.unique(),
-                    {
-                        userId: resolvedUserId,
-                        amount: intAmount,
-                        amountPaise: order.amount,
-                        currency: order.currency,
-                        razorpay_order_id: order.id,
-                        razorpay_payment_id: null,
-                        razorpay_signature: null,
-                        status: "unpaid",
-                        receipt: order.receipt,
-                        items: itemsForDb,           // Appwrite-friendly String[] field
-                        items_json: itemsJson,       // Full structured backup
-                        verification_raw: null,
-                        createdAt: new Date().toISOString(),
-                    }
-                )
-                .then(() => log("✅ Order saved in DB"))
-                .catch((err) => error("❌ Failed to save order: " + (err.message || err)));
-        } catch (dbErr) {
-            // In case createDocument throws synchronously (rare), log it
-            error("❌ Unexpected DB error: " + (dbErr.message || dbErr));
-        }
+            // Try to save document and wait for result (for debugging / verification)
+            const dbDoc = await databases.createDocument(
+                "68c414290032f31187eb", // Database ID
+                "68c58bfe0001e9581bd4", // Orders collection ID
+                ID.unique(),
+                {
+                    userId: resolvedUserId,
+                    amount: intAmount,
+                    amountPaise: order.amount,
+                    currency: order.currency,
+                    razorpay_order_id: order.id,
+                    razorpay_payment_id: null,
+                    razorpay_signature: null,
+                    status: "unpaid",
+                    receipt: order.receipt,
+                    items: itemsForDb,           // Appwrite-friendly String[] field
+                    items_json: itemsJson,       // Full structured backup
+                    verification_raw: null,
+                    createdAt: new Date().toISOString(),
+                }
+            );
 
-        // Respond immediately with the Razorpay order info (frontend needs this)
-        return res.json({
-            success: true,
-            orderId: order.id,
-            amount: order.amount,
-            currency: order.currency,
-        });
-    } catch (err) {
-        error("Unexpected error: " + (err.message || err));
-        return res.json({ success: false, error: err.message || String(err) }, 500);
-    }
-};
+            log("✅ Order saved in DB (awaited)", dbDoc.$id || dbDoc);
+            // Return the Razorpay order and the saved DB document for immediate verification
+            return res.json({
+                success: true,
+                orderId: order.id,
+                amount: order.amount,
+                currency: order.currency,
+                dbSaved: true,
+                dbDoc,
+            });
+        } catch (err) {
+            // If DB save fails, return the Razorpay order info plus the DB error so frontend can inspect
+            error("❌ Failed to save order (awaited): " + (err.message || err));
+            return res.json({
+                success: true,
+                orderId: order.id,
+                amount: order.amount,
+                currency: order.currency,
+                dbSaved: false,
+                dbError: err.message || String(err),
+            });
+        }
