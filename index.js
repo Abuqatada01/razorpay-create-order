@@ -17,7 +17,7 @@ export default async ({ req, res, log, error }) => {
             amount: amount * 100, // in paise
             currency: "INR",
         });
-
+        res.json({ success: true, order });
         // Connect to Appwrite
         const client = new Client()
             .setEndpoint("https://fra.cloud.appwrite.io/v1")
@@ -27,10 +27,10 @@ export default async ({ req, res, log, error }) => {
         const databases = new Databases(client);
 
         // Save to DB
-        await databases.createDocument(
+        databases.createDocument(
             "68c414290032f31187eb",
             "68c8567e001a18aefff0",
-            order.id, // use Razorpay order_id as docId
+            order.id,
             {
                 userId,
                 productName,
@@ -38,7 +38,7 @@ export default async ({ req, res, log, error }) => {
                 status: "unpaid",
                 date: new Date(),
             }
-        );
+        ).catch(err => error("DB save failed: " + err.message));
 
         return res.json({ success: true, order });
     } catch (err) {
