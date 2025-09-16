@@ -1,4 +1,4 @@
-// createOrder.js (Appwrite Function) - Optimized for speed (non-blocking DB write)
+// createOrder.js (Appwrite Function) - Fixed returns (non-blocking DB write)
 import Razorpay from "razorpay";
 import { Client, Databases, ID } from "node-appwrite";
 
@@ -20,13 +20,11 @@ const createRazorpayClient = () =>
 const safeParse = (raw) => {
     try {
         if (!raw) return {};
-        if (typeof raw === "string") {
-            return JSON.parse(raw);
-        }
+        if (typeof raw === "string") return JSON.parse(raw);
         if (typeof raw === "object") return raw;
     } catch {
         try {
-            const first = JSON.parse(String(raw));
+            const first = JSON.parse(String(raw || "{}"));
             return typeof first === "object" ? first : {};
         } catch {
             return {};
@@ -55,12 +53,8 @@ export default async ({ req, res, log, error }) => {
 
         const bodyData = safeParse(raw);
         // Normalize nested body/data if double-stringified
-        if (typeof bodyData.body === "string") {
-            Object.assign(bodyData, safeParse(bodyData.body));
-        }
-        if (typeof bodyData.data === "string") {
-            Object.assign(bodyData, safeParse(bodyData.data));
-        }
+        if (typeof bodyData.body === "string") Object.assign(bodyData, safeParse(bodyData.body));
+        if (typeof bodyData.data === "string") Object.assign(bodyData, safeParse(bodyData.data));
 
         // Extract fields
         const { userId, userID, user, items = [], amount, currency = "INR" } = bodyData || {};
@@ -108,7 +102,12 @@ export default async ({ req, res, log, error }) => {
 
         // Choose single size (string) from first item that has size (fast)
         let sizeForDb = null;
-        if (safeItemsRaw.length > 0 && safeItemsRaw[0] && typeof safeItemsRaw[0] === "object" && safeItemsRaw[0].size) {
+        if (
+            safeItemsRaw.length > 0 &&
+            safeItemsRaw[0] &&
+            typeof safeItemsRaw[0] === "object" &&
+            safeItemsRaw[0].size
+        ) {
             sizeForDb = String(safeItemsRaw[0].size);
         }
 
@@ -117,34 +116,18 @@ export default async ({ req, res, log, error }) => {
         try {
             const j = JSON.stringify(safeItemsRaw);
             const MAX_JSON_SAVE = 10 * 1024; // 10 KB threshold, tune as needed
-            if (j.length <= MAX_JSON_SAVE) {
-                itemsJson = j;
-            } else {
-                // skip storing very large JSON in DB to save write time and space
-                itemsJson = null;
-            }
+            if (j.length <= MAX_JSON_SAVE) itemsJson = j;
+            else itemsJson = null;
         } catch {
             itemsJson = null;
         }
 
-        // Immediate response to frontend — critical path ends here
-        res.json({
-            success: true,
-            orderId: order.id,
-            amount: order.amount,
-            currency: order.currency,
-        });
-
-        // -----------------------
+        // Start background DB worker BEFORE returning response.
         // Fire-and-forget DB write (non-blocking). We handle errors in the background.
-        // -----------------------
         (async () => {
             try {
-                // Add the Appwrite key from headers if present (clients top-level client lacks the key)
-                // The Databases instance uses the client created above; ensure it has a key if needed.
-                if (req.headers && req.headers["x-appwrite-key"]) {
-                    client.setKey(req.headers["x-appwrite-key"]);
-                }
+                // Use header key if provided (ensures permission to write)
+                if (req.headers && req.headers["x-appwrite-key"]) client.setKey(req.headers["x-appwrite-key"]);
 
                 const payload = {
                     userId: resolvedUserId,
@@ -162,26 +145,32 @@ export default async ({ req, res, log, error }) => {
                     createdAt: new Date().toISOString(),
                 };
 
-                // Non-blocking write (no await in the main flow)
-                databases.createDocument(
-                    "68c414290032f31187eb", // Database ID
-                    "68c58bfe0001e9581bd4", // Orders collection ID
-                    ID.unique(),
-                    payload
-                ).then((doc) => {
-                    // minimal success log
-                    log("Order saved (async):", doc.$id || "(no id)");
-                }).catch((dbErr) => {
-                    // background error; log for diagnostics
-                    error("Async DB save failed: " + (dbErr.message || dbErr));
-                });
+                // Non-blocking write
+                databases
+                    .createDocument(
+                        "68c414290032f31187eb", // Database ID
+                        "68c58bfe0001e9581bd4", // Orders collection ID
+                        ID.unique(),
+                        payload
+                    )
+                    .then((doc) => {
+                        log("Order saved (async):", doc.$id || "(no id)");
+                    })
+                    .catch((dbErr) => {
+                        error("Async DB save failed: " + (dbErr.message || dbErr));
+                    });
             } catch (bgErr) {
                 error("Background DB worker error: " + (bgErr.message || bgErr));
             }
         })();
 
-        // end main try
-        return;
+        // Return the response (important: do this AFTER starting background worker)
+        return res.json({
+            success: true,
+            orderId: order.id,
+            amount: order.amount,
+            currency: order.currency,
+        });
     } catch (err) {
         error("Critical error: " + (err.message || err));
         return res.json({ success: false, error: err.message || String(err) }, 500);
