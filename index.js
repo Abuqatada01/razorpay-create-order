@@ -130,7 +130,7 @@ export default async ({ req, res, log, error }) => {
                     status: "unpaid",
                     receipt: order.receipt,
                     items: itemsForDb,     // "Product Name (Size: 32)"
-                    sizes: sizesForDb,     // ["32"]
+                    size: sizesForDb,     // ["32"]
                     items_json: itemsJson, // full backup
                     createdAt: new Date().toISOString(),
                 }
