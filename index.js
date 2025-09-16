@@ -54,11 +54,13 @@ export default async ({ req, res, log, error }) => {
             return res.json({ success: false, message: "Invalid JSON or payload format" }, 400);
         }
 
+        log("🔎 Parsed payload (first 400 chars):", JSON.stringify(bodyData).slice(0, 400));
+
         // Extract fields
         const { userId, userID, user, items = [], amount, currency = "INR" } = bodyData || {};
         const resolvedUserId = userId || userID || (user && user.id) || user || null;
 
-        if (!resolvedUserId || !amount) {
+        if (!resolvedUserId || typeof amount === "undefined" || amount === null) {
             return res.json({ success: false, message: "userId and amount required" }, 400);
         }
 
@@ -75,7 +77,7 @@ export default async ({ req, res, log, error }) => {
         });
         log("✅ Razorpay order created:", order?.id || "(no id)");
 
-        // ----------------- Items + Sizes -----------------
+        // ----------------- Items + single Size (string) -----------------
         const safeItemsRaw = Array.isArray(items)
             ? items
             : (typeof items === "string" ? (() => {
@@ -84,11 +86,11 @@ export default async ({ req, res, log, error }) => {
 
         const MAX_LEN = 490;
 
-        // For Appwrite `items` field (String[])
+        // For Appwrite `items` field (String[]) - include name + size in label
         const itemsForDb = safeItemsRaw.map((it, idx) => {
             try {
                 if (typeof it === "object" && it !== null) {
-                    const name = it.name || `item_${idx + 1}`;
+                    const name = it.name || it.title || `item_${idx + 1}`;
                     const size = it.size ? ` (Size: ${it.size})` : "";
                     const label = `${name}${size}`;
                     return label.length > MAX_LEN ? label.slice(0, MAX_LEN) + "…" : label;
@@ -100,10 +102,19 @@ export default async ({ req, res, log, error }) => {
             }
         });
 
-        // For separate sizes field
-        const sizesForDb = safeItemsRaw
-            .map((it) => (it && typeof it === "object" && it.size ? String(it.size) : null))
-            .filter(Boolean);
+        // Single size string: take from the first item that has size, else null
+        let sizeForDb = null;
+        try {
+            for (let i = 0; i < safeItemsRaw.length; i++) {
+                const it = safeItemsRaw[i];
+                if (it && typeof it === "object" && it.size) {
+                    sizeForDb = String(it.size);
+                    break;
+                }
+            }
+        } catch (e) {
+            sizeForDb = null;
+        }
 
         // Full JSON backup
         let itemsJson = "[]";
@@ -129,10 +140,10 @@ export default async ({ req, res, log, error }) => {
                     razorpay_signature: null,
                     status: "unpaid",
                     receipt: order.receipt,
-                    items: itemsForDb,     // "Product Name (Size: 32)"
-                    size: sizesForDb,     // ["32"]
-                    items_json: itemsJson, // full backup
-                    // createdAt: new Date().toISOString(),
+                    items: itemsForDb,     // ["Product Name (Size: 30)"]
+                    size: sizeForDb,       // "30" (single string) or null
+                    items_json: itemsJson, // full structured backup
+                    createdAt: new Date().toISOString(),
                 }
             );
 
