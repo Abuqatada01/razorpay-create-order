@@ -150,10 +150,9 @@ export default async ({ req, res, log, error }) => {
         }
 
         // -------------------------
-        // Persist order in Appwrite DB (non-blocking - we don't hold up the response)
+        // Persist order in Appwrite DB (awaited so frontend receives dbDoc for verification)
         // -------------------------
         try {
-            // Try to save document and wait for result (for debugging / verification)
             const dbDoc = await databases.createDocument(
                 "68c414290032f31187eb", // Database ID
                 "68c58bfe0001e9581bd4", // Orders collection ID
@@ -197,3 +196,8 @@ export default async ({ req, res, log, error }) => {
                 dbError: err.message || String(err),
             });
         }
+    } catch (err) {
+        error("Unexpected error: " + (err.message || err));
+        return res.json({ success: false, error: err.message || String(err) }, 500);
+    }
+};
