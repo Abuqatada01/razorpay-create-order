@@ -1,21 +1,7 @@
 // createOrder.js (Appwrite Function) - Create order for COD or Razorpay and save shipping/phone to orders collection
-// Supports:
-//  - paymentMethod: "cod"  -> create Appwrite order doc (no Razorpay)
-//  - paymentMethod: "razorpay" -> create Razorpay order, then create/update Appwrite order doc with razorpay details
-//
-// Expected POST body (JSON):
-// {
-//   "amount": 1000,                // in rupees (number) - required for razorpay, recommended for COD
-//   "currency": "INR",             // optional
-//   "userId": "user_xxx",          // optional - your user id
-//   "items": [...],                // optional - order items
-//   "paymentMethod": "cod"|"razorpay",
-//   "shipping": {...} OR [ {...} ],// shipping object or array (first entry used as primary)
-//   "shippingPrimaryIndex": 0      // optional index into shipping array for primary address
-// }
+// ESM-compatible (node-appwrite named exports)
 import Razorpay from "razorpay";
-import pkg from "node-appwrite";
-const { Client: AppwriteClient, Databases, Query, ID } = pkg;
+import { Client as AppwriteClient, Databases, Query, ID } from "node-appwrite";
 
 const createRazorpayClient = () =>
     new Razorpay({
@@ -144,8 +130,8 @@ export default async ({ req, res, log, error }) => {
                     shipping_state,
                     shipping_postalCode,
                     shipping_country,
-                    $createdAt: new Date().toISOString(),
-                    $updatedAt: new Date().toISOString(),
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
                 };
 
                 // Try to find existing document by orderId (if razorpayOrderId present)
