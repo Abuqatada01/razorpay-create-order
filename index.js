@@ -87,6 +87,7 @@ export default async ({ req, res, log, error }) => {
                 return {};
             }
         })();
+        console.log(body);
 
         const {
             amount,
