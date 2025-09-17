@@ -168,7 +168,7 @@ export default async ({ req, res, log, error }) => {
 
                     // payment method/status
                     payment_method: pm,
-                    paymentMethod: pm,
+                    // paymentMethod: pm,
                     status: pm === "cod" ? "pending" : "created",
 
                     // shipping MUST be present (required)
@@ -187,13 +187,13 @@ export default async ({ req, res, log, error }) => {
                     // size (required)
                     size: primarySize,
                     // also include item_size alias
-                    item_size: primarySize,
+                    // item_size: primarySize,
 
                     // verification / meta
                     verification_raw: JSON.stringify({ razorpayOrder: razorpayOrder || null }),
                     receipt: razorpayOrder?.receipt || null,
-                    createdAt: now,
-                    updatedAt: now,
+                    $createdAt: now,
+                    $updatedAt: now,
                 };
 
                 // Try to update an existing doc with same razorpay_order_id (avoid duplicates)
@@ -230,7 +230,7 @@ export default async ({ req, res, log, error }) => {
         return res.json({
             success: true,
             payment_method: pm,
-            orderId: razorpayOrderId,
+            razorpay_order_id: razorpayOrderId,
             amount: amountPaise,
             currency,
             razorpayOrder: razorpayOrder || null,
