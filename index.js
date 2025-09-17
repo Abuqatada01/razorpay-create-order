@@ -74,6 +74,16 @@ export default async ({ req, res, log, error }) => {
         const shipping_postalCode = normalizeStr(primaryShipping.postalCode || primaryShipping.postal_code) || null;
         const shipping_country = normalizeStr(primaryShipping.country) || "India";
 
+        // Create snake_case aliases (prevent "not defined" errors)
+        const shipping_full_name = shipping_fullName;
+        const shipping_phone_snake = shipping_phone;
+        const shipping_line_1 = shipping_line1;
+        const shipping_line_2 = shipping_line2;
+        const shipping_city_snake = shipping_city;
+        const shipping_state_snake = shipping_state;
+        const shipping_postal_code = shipping_postalCode;
+        const shipping_country_snake = shipping_country;
+
         // Extract size information (many collections require top-level size)
         // Prefer first item's `size` if present; also support item.size nested
         let primarySize = null;
@@ -130,10 +140,7 @@ export default async ({ req, res, log, error }) => {
         if (APPWRITE_ENDPOINT && APPWRITE_PROJECT_ID && APPWRITE_API_KEY && APPWRITE_DATABASE_ID && APPWRITE_ORDERS_COLLECTION_ID) {
             try {
                 log("🔁 Initializing Appwrite client for saving order");
-                const client = new AppwriteClient()
-                    .setEndpoint(APPWRITE_ENDPOINT)
-                    .setProject(APPWRITE_PROJECT_ID)
-                    .setKey(APPWRITE_API_KEY);
+                const client = new AppwriteClient().setEndpoint(APPWRITE_ENDPOINT).setProject(APPWRITE_PROJECT_ID).setKey(APPWRITE_API_KEY);
                 const databases = new Databases(client);
 
                 // Build payload including both camelCase and snake_case fields
@@ -176,13 +183,13 @@ export default async ({ req, res, log, error }) => {
 
                     // flattened fields snake_case for Appwrite attributes
                     shipping_full_name,
-                    shipping_phone: shipping_phone,
+                    shipping_phone: shipping_phone_snake,
                     shipping_line_1,
                     shipping_line_2,
-                    shipping_city: shipping_city,
-                    shipping_state: shipping_state,
+                    shipping_city: shipping_city_snake,
+                    shipping_state: shipping_state_snake,
                     shipping_postal_code,
-                    shipping_country: shipping_country,
+                    shipping_country: shipping_country_snake,
 
                     // size fields (required by your collection)
                     size: size || null,
