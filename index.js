@@ -10,6 +10,36 @@ const createRazorpayClient = () =>
     });
 
 const normalizeStr = (v) => (typeof v === "string" ? v.trim() : v);
+const TRUNCATE_MAX = 9999; // Appwrite per-string limit
+
+// build a readable single-string representation for an item
+const stringifyItem = (it) => {
+    try {
+        if (!it && it !== 0) return "";
+        if (typeof it === "string") {
+            return it.length > TRUNCATE_MAX ? it.slice(0, TRUNCATE_MAX) : it;
+        }
+        if (typeof it === "number" || typeof it === "boolean") {
+            return String(it);
+        }
+        // object: build readable label
+        const name = it.name || it.title || it.productId || it.id || "item";
+        const price =
+            (typeof it.price !== "undefined" ? it.price : it.amount) || null;
+        const size = it.size || it.s || it.sizeOption || it.item_size || null;
+        const sizeLabel = size ? ` (Size: ${size})` : "";
+        const priceLabel = price ? ` - ₹${price}` : "";
+        const label = `${name}${sizeLabel}${priceLabel}`;
+        const jsonFallback = JSON.stringify(it);
+        const final = label.length >= 6 ? label : jsonFallback; // prefer label but fallback
+        // ensure not too long
+        return final.length > TRUNCATE_MAX ? final.slice(0, TRUNCATE_MAX) : final;
+    } catch (err) {
+        // last resort
+        const s = JSON.stringify(it || {});
+        return s.length > TRUNCATE_MAX ? s.slice(0, TRUNCATE_MAX) : s;
+    }
+};
 
 export default async ({ req, res, log, error }) => {
     try {
@@ -17,10 +47,13 @@ export default async ({ req, res, log, error }) => {
 
         if (req.method !== "POST") {
             if (req.method === "GET") return res.text("createOrder function is live");
-            return res.json({ success: false, message: `Method ${req.method} not allowed` }, 405);
+            return res.json(
+                { success: false, message: `Method ${req.method} not allowed` },
+                405
+            );
         }
 
-        // Parse body safely
+        // safe parse
         const body = (() => {
             try {
                 return JSON.parse(req.bodyRaw || "{}");
@@ -29,7 +62,7 @@ export default async ({ req, res, log, error }) => {
             }
         })();
 
-        // Accept both camelCase and snake_case input keys
+        // Accept both camelCase and snake_case client keys
         const {
             amount, // rupees (number) expected from client
             currency = "INR",
@@ -45,7 +78,10 @@ export default async ({ req, res, log, error }) => {
 
         // collection requires userId
         if (!userId) {
-            return res.json({ success: false, message: "userId is required. Please login and send userId." }, 400);
+            return res.json(
+                { success: false, message: "userId is required. Please login and send userId." },
+                400
+            );
         }
 
         // normalize shipping into array
@@ -55,7 +91,10 @@ export default async ({ req, res, log, error }) => {
         else shippingArray = [];
 
         if (shippingArray.length === 0) {
-            return res.json({ success: false, message: "shipping is required. Provide shipping object/array." }, 400);
+            return res.json(
+                { success: false, message: "shipping is required. Provide shipping object/array." },
+                400
+            );
         }
 
         const primaryIndex = Number.isInteger(shippingPrimaryIndex) ? shippingPrimaryIndex : 0;
@@ -68,6 +107,7 @@ export default async ({ req, res, log, error }) => {
         const shipping_line_2 = normalizeStr(primaryShipping.line2 || primaryShipping.line_2) || null;
         const shipping_city = normalizeStr(primaryShipping.city) || null;
         const shipping_postal_code = normalizeStr(primaryShipping.postalCode || primaryShipping.postal_code) || null;
+        const shipping_country = normalizeStr(primaryShipping.country) || "India";
 
         // derive size from items (collection requires `size`)
         let primarySize = null;
@@ -117,6 +157,19 @@ export default async ({ req, res, log, error }) => {
             amountPaise = amountPaiseFromClient;
         }
 
+        // ---------------------------
+        // PREPARE items_for_column (array of strings) and items_json (full JSON)
+        // ---------------------------
+        const itemsForColumn = Array.isArray(items)
+            ? items.map((it) => {
+                const s = stringifyItem(it);
+                // ensure each element is string and within limit
+                return typeof s === "string" ? (s.length > TRUNCATE_MAX ? s.slice(0, TRUNCATE_MAX) : s) : String(s).slice(0, TRUNCATE_MAX);
+            })
+            : [];
+
+        const itemsJson = JSON.stringify(items || []);
+
         // Appwrite config from env
         const APPWRITE_ENDPOINT = process.env.APPWRITE_ENDPOINT;
         const APPWRITE_PROJECT_ID = process.env.APPWRITE_PROJECT_ID;
@@ -141,17 +194,17 @@ export default async ({ req, res, log, error }) => {
 
                     // required columns
                     userId: userId,
-                    amount: amountPaise, // store amount in paise as integer (your screenshot shows amount required)
-                    amountPaise: amountPaise, // also include amountPaise column if present
+                    amount: amountPaise, // store amount in paise as integer
+                    amountPaise: amountPaise, // also include if present
                     currency: currency,
 
                     // razorpay fields (snake_case column names in your collection)
                     razorpay_order_id: razorpay_order_id, // required
                     // razorpay_payment_id and razorpay_signature will be set in verification step
 
-                    // items and items_json (you had these columns)
-                    items: Array.isArray(items) ? items : [],
-                    items_json: JSON.stringify(items || []),
+                    // items and items_json: items must be array-of-strings for your collection; full JSON in items_json
+                    items: itemsForColumn,
+                    items_json: itemsJson,
 
                     // payment & status
                     payment_method: pm,
@@ -164,9 +217,10 @@ export default async ({ req, res, log, error }) => {
                     shipping_full_name,
                     shipping_phone,
                     shipping_line_1,
-                    // shipping_line_2,
+                    //   shipping_line_2,
                     shipping_city,
                     shipping_postal_code,
+                    shipping_country,
 
                     // required size
                     size: primarySize,
@@ -175,8 +229,7 @@ export default async ({ req, res, log, error }) => {
                     receipt: razorpayOrder?.receipt || null,
                     verification_raw: JSON.stringify({ razorpayOrder: razorpayOrder || null }),
 
-                    // $createdAt: now,
-                    // $updatedAt: now,
+                    // do not set Appwrite internal $crea/$updatedAt here manually unless you want to
                 };
 
                 // Try to find existing order by razorpay_order_id to avoid duplicates
