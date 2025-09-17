@@ -1,106 +1,62 @@
-import express from "express";
+// createOrder.js (Appwrite Function) - Only create Razorpay order
 import Razorpay from "razorpay";
-import { Client, Databases, ID } from "node-appwrite";
 
-const app = express();
-app.use(express.json());
+const createRazorpayClient = () =>
+    new Razorpay({
+        key_id: process.env.RAZORPAY_KEY_ID,
+        key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
 
-// Initialize Razorpay
-const razorpay = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID,
-    key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
-
-// Initialize Appwrite
-const client = new Client()
-    .setEndpoint(process.env.APPWRITE_ENDPOINT)
-    .setProject(process.env.APPWRITE_PROJECT_ID)
-    .setKey(process.env.APPWRITE_API_KEY);
-
-const databases = new Databases(client);
-
-app.post("/create-order", async (req, res) => {
+export default async ({ req, res, log, error }) => {
     try {
-        const { amount, currency, userId, shipping, items } = req.body;
+        log("⚡ Create-Order started");
 
-        if (!amount || !userId) {
-            return res.status(400).json({
-                success: false,
-                message: "amount and userId required",
-            });
+        if (req.method !== "POST") {
+            if (req.method === "GET")
+                return res.text("🚀 Razorpay Appwrite Function is live");
+            return res.json(
+                { success: false, message: `Method ${req.method} not allowed` },
+                405
+            );
         }
 
-        // 1. Create Razorpay order
-        const options = {
-            amount: amount * 100, // Razorpay expects paise
-            currency: currency || "INR",
-            receipt: `receipt_${Date.now()}`,
-        };
+        const bodyData = (() => {
+            try {
+                return JSON.parse(req.bodyRaw || "{}");
+            } catch {
+                return {};
+            }
+        })();
 
-        const order = await razorpay.orders.create(options);
+        const { amount, currency = "INR" } = bodyData || {};
 
-        // 2. Prepare data for Appwrite
-        const shippingArray = Array.isArray(shipping) ? shipping : [shipping];
-        const shipping_first = shippingArray[0] || {};
+        if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+            return res.json(
+                { success: false, message: "Valid amount required" },
+                400
+            );
+        }
 
-        const shipping_short = `${shipping_first.full_name || ""}, ${shipping_first.line_1 || ""}, ${shipping_first.city || ""}`;
+        const razorpay = createRazorpayClient();
+        const order = await razorpay.orders.create({
+            amount: Number(amount) * 100, // paise
+            currency,
+            receipt: `order_rcpt_${Date.now()}`,
+        });
 
-        const items_short = (items || []).map(
-            (item) => `${item.name} x ${item.quantity}`
-        );
+        log("✅ Razorpay order created:", order.id);
 
-        // 3. Build payload matching Appwrite schema
-        const payload = {
-            userId,
-            productId: items?.map((i) => i.productId).join(", "),
-            productName: items?.map((i) => i.name).join(", "),
-            amount,
-            paymentId: "",
-            orderId: order.id,
-            status: "unpaid",
-            date: new Date().toISOString(),
-
-            // Flattened shipping fields
-            shipping_full_name: shipping_first.full_name || "",
-            shipping_phone: shipping_first.phone || "",
-            shipping_line_1: shipping_first.line_1 || "",
-            //   shipping_line_2: shipping_first.line_2 || "",
-            shipping_city: shipping_first.city || "",
-            shipping_state: shipping_first.state || "",
-            shipping_country: shipping_first.country || "",
-            shipping_postal_code: shipping_first.postal_code || "",
-
-            // Schema expects strings:
-            shipping: shipping_short, // ✅ short string version
-            items: JSON.stringify(items_short).slice(0, 9999), // ✅ stringified summary
-            items_json: JSON.stringify(items || []).slice(0, 999), // ✅ stringified full items
-        };
-
-        // 4. Save order in Appwrite
-        const savedOrder = await databases.createDocument(
-            process.env.APPWRITE_DATABASE_ID,
-            process.env.APPWRITE_ORDERS_COLLECTION_ID,
-            ID.unique(),
-            payload
-        );
-
-        // 5. Send response
-        res.json({
+        return res.json({
             success: true,
-            order,
-            appwriteOrder: savedOrder,
+            orderId: order.id,
+            amount: order.amount,
+            currency: order.currency,
         });
-    } catch (error) {
-        console.error("Error creating order:", error);
-        res.status(500).json({
-            success: false,
-            message: "Server error",
-            error: error.message,
-        });
+    } catch (err) {
+        error("Critical error: " + (err.message || err));
+        return res.json(
+            { success: false, error: err.message || String(err) },
+            500
+        );
     }
-});
-
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+};
