@@ -164,7 +164,7 @@ export default async ({ req, res, log, error }) => {
                     shipping_full_name,
                     shipping_phone,
                     shipping_line_1,
-                    shipping_line_2,
+                    // shipping_line_2,
                     shipping_city,
                     shipping_postal_code,
 
