@@ -29,22 +29,27 @@ export default async ({ req, res, log, error }) => {
             }
         })();
 
+        // Note: accept both camelCase and snake_case input keys for compatibility
         const {
             amount,
             currency = "INR",
             userId = null,
             items = [],
-            payment_method = "razorpay",
+            paymentMethod, // prefer camelCase from client
+            payment_method, // accept snake_case too
             shipping = null,
             shippingPrimaryIndex = 0,
         } = body || {};
 
+        // unify payment method name
+        const pm = paymentMethod || payment_method || "razorpay";
+
         // basic validation
-        if (!payment_method || !["cod", "razorpay"].includes(payment_method)) {
-            return res.json({ success: false, message: "payment_method must be 'cod' or 'razorpay'" }, 400);
+        if (!pm || !["cod", "razorpay"].includes(pm)) {
+            return res.json({ success: false, message: "paymentMethod must be 'cod' or 'razorpay'" }, 400);
         }
 
-        if (payment_method === "razorpay") {
+        if (pm === "razorpay") {
             if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
                 return res.json({ success: false, message: "Valid amount required for razorpay orders" }, 400);
             }
@@ -60,24 +65,35 @@ export default async ({ req, res, log, error }) => {
         const primaryShipping = shippingArray[primaryIndex] || shippingArray[0] || {};
 
         // Flatten primary shipping fields for indexing (camelCase)
-        const shipping_fullName = normalizeStr(primaryShipping.fullName) || null;
+        const shipping_fullName = normalizeStr(primaryShipping.fullName || primaryShipping.full_name) || null;
         const shipping_phone = normalizeStr(primaryShipping.phone) || null;
-        const shipping_line1 = normalizeStr(primaryShipping.line1) || null;
-        const shipping_line2 = normalizeStr(primaryShipping.line2) || null;
+        const shipping_line1 = normalizeStr(primaryShipping.line1 || primaryShipping.line_1) || null;
+        const shipping_line2 = normalizeStr(primaryShipping.line2 || primaryShipping.line_2) || null;
         const shipping_city = normalizeStr(primaryShipping.city) || null;
         const shipping_state = normalizeStr(primaryShipping.state) || null;
-        const shipping_postalCode = normalizeStr(primaryShipping.postalCode) || null;
+        const shipping_postalCode = normalizeStr(primaryShipping.postalCode || primaryShipping.postal_code) || null;
         const shipping_country = normalizeStr(primaryShipping.country) || "India";
 
-        // Also prepare snake_case versions for Appwrite attributes
-        const shipping_full_name = shipping_fullName;
-        const shipping_phone_snake = shipping_phone;
-        const shipping_line_1 = shipping_line1;
-        const shipping_line_2 = shipping_line2;
-        const shipping_city_snake = shipping_city;
-        const shipping_state_snake = shipping_state;
-        const shipping_postal_code = shipping_postalCode;
-        const shipping_country_snake = shipping_country;
+        // Extract size information (many collections require top-level size)
+        // Prefer first item's `size` if present; also support item.size nested
+        let primarySize = null;
+        if (Array.isArray(items) && items.length > 0) {
+            const first = items[0];
+            if (first && (first.size || first.s || first.sizeOption)) {
+                primarySize = String(first.size || first.s || first.sizeOption);
+            } else if (typeof first === "string") {
+                // if items are simple strings, no size
+                primarySize = null;
+            } else {
+                // try to find any item with size property
+                const found = items.find((it) => it && (it.size || it.s || it.sizeOption));
+                if (found) primarySize = String(found.size || found.s || found.sizeOption);
+            }
+        }
+
+        // Also include snake_case size for Appwrite attr
+        const size = primarySize;
+        const item_size = primarySize;
 
         // Appwrite env
         const APPWRITE_ENDPOINT = process.env.APPWRITE_ENDPOINT;
@@ -94,7 +110,7 @@ export default async ({ req, res, log, error }) => {
         let razorpayOrderId = null;
         let razorpayAmountPaise = null;
         let razorpayCurrency = currency;
-        if (payment_method === "razorpay") {
+        if (pm === "razorpay") {
             if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
                 return res.json({ success: false, message: "Razorpay credentials not configured" }, 500);
             }
@@ -121,25 +137,28 @@ export default async ({ req, res, log, error }) => {
                 const databases = new Databases(client);
 
                 // Build payload including both camelCase and snake_case fields
+                const canonicalOrderId = razorpayOrderId || `cod_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+
                 const payload = {
                     // canonical order id (Razorpay id for online payments, server id for COD)
-                    orderId: razorpayOrderId || `cod_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
-                    // snake_case alias (in case Appwrite collection expects this name)
-                    order_id: razorpayOrderId || `cod_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+                    orderId: canonicalOrderId,
+                    // snake_case alias (in case Appwrite collection expects snake names)
+                    order_id: canonicalOrderId,
 
                     userId,
                     items,
-                    status: payment_method === "cod" ? "pending" : "created",
-                    payment_method,
+                    status: pm === "cod" ? "pending" : "created",
+                    paymentMethod: pm,
+                    payment_method: pm,
                     // amount stored in paise
-                    amount: payment_method === "razorpay" ? razorpayAmountPaise : Math.round(Number(amount || 0) * 100),
+                    amount: pm === "razorpay" ? razorpayAmountPaise : Math.round(Number(amount || 0) * 100),
                     currency: razorpayCurrency,
                     // razorpay-specific fields (both snake_case and camelCase)
                     razorpayOrderId: razorpayOrderId || null,
                     razorpay_order_id: razorpayOrderId || null,
                     razorpayRaw: razorpayOrder || null,
                     razorpay_raw: razorpayOrder || null,
-                    razorpay_amount: razorpayAmountPaise || (payment_method === "cod" ? Math.round(Number(amount || 0) * 100) : null),
+                    razorpay_amount: razorpayAmountPaise || (pm === "cod" ? Math.round(Number(amount || 0) * 100) : null),
                     razorpay_currency: razorpayCurrency,
 
                     // full shipping array preserved
@@ -157,13 +176,17 @@ export default async ({ req, res, log, error }) => {
 
                     // flattened fields snake_case for Appwrite attributes
                     shipping_full_name,
-                    shipping_phone: shipping_phone_snake,
+                    shipping_phone: shipping_phone,
                     shipping_line_1,
                     shipping_line_2,
-                    shipping_city: shipping_city_snake,
-                    shipping_state: shipping_state_snake,
+                    shipping_city: shipping_city,
+                    shipping_state: shipping_state,
                     shipping_postal_code,
-                    shipping_country: shipping_country_snake,
+                    shipping_country: shipping_country,
+
+                    // size fields (required by your collection)
+                    size: size || null,
+                    item_size: item_size || null,
 
                     $createdAt: new Date().toISOString(),
                     $updatedAt: new Date().toISOString(),
@@ -189,15 +212,16 @@ export default async ({ req, res, log, error }) => {
                     const update = {
                         ...existing,
                         ...payload,
-                        updatedAt: new Date().toISOString(),
+                        $updatedAt: new Date().toISOString(),
                     };
-                    savedOrderDoc = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_ORDERS_COLLECTION_ID, existing.$id, update);
+                    // updateDocument expects (databaseId, collectionId, documentId, data)
+                    savedOrderDoc = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_ORDERS_COLLECTION_ID, existing.$id, payload);
                 } else {
                     log("➕ Creating new Appwrite order doc");
                     savedOrderDoc = await databases.createDocument(APPWRITE_DATABASE_ID, APPWRITE_ORDERS_COLLECTION_ID, ID.unique(), payload);
                 }
 
-                log("✅ Order saved to Appwrite orders collection:", savedOrderDoc.$id);
+                log("✅ Order saved to Appwrite orders collection:", savedOrderDoc.$id || savedOrderDoc.$id);
             } catch (dbErr) {
                 // non-fatal; log and continue
                 error("Error saving order to Appwrite DB:", dbErr.message || dbErr);
@@ -209,9 +233,9 @@ export default async ({ req, res, log, error }) => {
         // Build response
         const responsePayload = {
             success: true,
-            payment_method,
+            paymentMethod: pm,
             orderId: razorpayOrderId || (savedOrderDoc && savedOrderDoc.orderId) || null,
-            amount: payment_method === "razorpay" ? razorpayAmountPaise : Math.round(Number(amount || 0) * 100),
+            amount: pm === "razorpay" ? razorpayAmountPaise : Math.round(Number(amount || 0) * 100),
             currency: razorpayCurrency,
             razorpayOrder: razorpayOrder || null,
             savedOrderDoc: savedOrderDoc || null,
