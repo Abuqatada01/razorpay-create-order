@@ -175,8 +175,8 @@ export default async ({ req, res, log, error }) => {
                     receipt: razorpayOrder?.receipt || null,
                     verification_raw: JSON.stringify({ razorpayOrder: razorpayOrder || null }),
 
-                    createdAt: now,
-                    updatedAt: now,
+                    $createdAt: now,
+                    $updatedAt: now,
                 };
 
                 // Try to find existing order by razorpay_order_id to avoid duplicates
