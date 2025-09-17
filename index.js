@@ -217,7 +217,7 @@ export default async ({ req, res, log, error }) => {
                     shipping_full_name,
                     shipping_phone,
                     shipping_line_1,
-                    //   shipping_line_2,
+                    shipping_line_2,
                     shipping_city,
                     shipping_postal_code,
                     shipping_country,
@@ -229,7 +229,7 @@ export default async ({ req, res, log, error }) => {
                     receipt: razorpayOrder?.receipt || null,
                     verification_raw: JSON.stringify({ razorpayOrder: razorpayOrder || null }),
 
-                    // do not set Appwrite internal $crea/$updatedAt here manually unless you want to
+                    // do not set Appwrite internal $createdAt/$updatedAt here manually unless you want to
                 };
 
                 // Try to find existing order by razorpay_order_id to avoid duplicates
