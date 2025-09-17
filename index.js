@@ -34,17 +34,17 @@ export default async ({ req, res, log, error }) => {
             currency = "INR",
             userId = null,
             items = [],
-            paymentMethod = "razorpay",
+            payment_method = "razorpay",
             shipping = null,
             shippingPrimaryIndex = 0,
         } = body || {};
 
         // basic validation
-        if (!paymentMethod || !["cod", "razorpay"].includes(paymentMethod)) {
-            return res.json({ success: false, message: "paymentMethod must be 'cod' or 'razorpay'" }, 400);
+        if (!payment_method || !["cod", "razorpay"].includes(payment_method)) {
+            return res.json({ success: false, message: "payment_method must be 'cod' or 'razorpay'" }, 400);
         }
 
-        if (paymentMethod === "razorpay") {
+        if (payment_method === "razorpay") {
             if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
                 return res.json({ success: false, message: "Valid amount required for razorpay orders" }, 400);
             }
@@ -59,7 +59,7 @@ export default async ({ req, res, log, error }) => {
         const primaryIndex = Number.isInteger(shippingPrimaryIndex) ? shippingPrimaryIndex : 0;
         const primaryShipping = shippingArray[primaryIndex] || shippingArray[0] || {};
 
-        // Flatten primary shipping fields for indexing
+        // Flatten primary shipping fields for indexing (camelCase)
         const shipping_fullName = normalizeStr(primaryShipping.fullName) || null;
         const shipping_phone = normalizeStr(primaryShipping.phone) || null;
         const shipping_line1 = normalizeStr(primaryShipping.line1) || null;
@@ -68,6 +68,16 @@ export default async ({ req, res, log, error }) => {
         const shipping_state = normalizeStr(primaryShipping.state) || null;
         const shipping_postalCode = normalizeStr(primaryShipping.postalCode) || null;
         const shipping_country = normalizeStr(primaryShipping.country) || "India";
+
+        // Also prepare snake_case versions for Appwrite attributes
+        const shipping_full_name = shipping_fullName;
+        const shipping_phone_snake = shipping_phone;
+        const shipping_line_1 = shipping_line1;
+        const shipping_line_2 = shipping_line2;
+        const shipping_city_snake = shipping_city;
+        const shipping_state_snake = shipping_state;
+        const shipping_postal_code = shipping_postalCode;
+        const shipping_country_snake = shipping_country;
 
         // Appwrite env
         const APPWRITE_ENDPOINT = process.env.APPWRITE_ENDPOINT;
@@ -83,7 +93,8 @@ export default async ({ req, res, log, error }) => {
         // If razorpay: create Razorpay order first
         let razorpayOrderId = null;
         let razorpayAmountPaise = null;
-        if (paymentMethod === "razorpay") {
+        let razorpayCurrency = currency;
+        if (payment_method === "razorpay") {
             if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
                 return res.json({ success: false, message: "Razorpay credentials not configured" }, 500);
             }
@@ -95,6 +106,7 @@ export default async ({ req, res, log, error }) => {
             });
             razorpayOrderId = razorpayOrder.id;
             razorpayAmountPaise = razorpayOrder.amount;
+            razorpayCurrency = razorpayOrder.currency || razorpayCurrency;
             log("✅ Razorpay order created:", razorpayOrderId);
         }
 
@@ -108,20 +120,32 @@ export default async ({ req, res, log, error }) => {
                     .setKey(APPWRITE_API_KEY);
                 const databases = new Databases(client);
 
-                // Build payload (nested shipping array + flattened primary fields)
+                // Build payload including both camelCase and snake_case fields
                 const payload = {
-                    // if razorpay exists use that id, otherwise create a unique server order id
+                    // canonical order id (Razorpay id for online payments, server id for COD)
                     orderId: razorpayOrderId || `cod_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+                    // snake_case alias (in case Appwrite collection expects this name)
+                    order_id: razorpayOrderId || `cod_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+
                     userId,
                     items,
-                    status: paymentMethod === "cod" ? "pending" : "created",
-                    paymentMethod,
-                    amount: paymentMethod === "razorpay" ? razorpayAmountPaise : Math.round(Number(amount || 0) * 100),
-                    currency,
+                    status: payment_method === "cod" ? "pending" : "created",
+                    payment_method,
+                    // amount stored in paise
+                    amount: payment_method === "razorpay" ? razorpayAmountPaise : Math.round(Number(amount || 0) * 100),
+                    currency: razorpayCurrency,
+                    // razorpay-specific fields (both snake_case and camelCase)
                     razorpayOrderId: razorpayOrderId || null,
+                    razorpay_order_id: razorpayOrderId || null,
                     razorpayRaw: razorpayOrder || null,
-                    shipping: shippingArray, // full array preserved
-                    // flattened fields for indexing/search
+                    razorpay_raw: razorpayOrder || null,
+                    razorpay_amount: razorpayAmountPaise || (payment_method === "cod" ? Math.round(Number(amount || 0) * 100) : null),
+                    razorpay_currency: razorpayCurrency,
+
+                    // full shipping array preserved
+                    shipping: shippingArray,
+
+                    // flattened fields camelCase
                     shipping_fullName,
                     shipping_phone,
                     shipping_line1,
@@ -130,8 +154,19 @@ export default async ({ req, res, log, error }) => {
                     shipping_state,
                     shipping_postalCode,
                     shipping_country,
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
+
+                    // flattened fields snake_case for Appwrite attributes
+                    shipping_full_name,
+                    shipping_phone: shipping_phone_snake,
+                    shipping_line_1,
+                    shipping_line_2,
+                    shipping_city: shipping_city_snake,
+                    shipping_state: shipping_state_snake,
+                    shipping_postal_code,
+                    shipping_country: shipping_country_snake,
+
+                    $createdAt: new Date().toISOString(),
+                    $updatedAt: new Date().toISOString(),
                 };
 
                 // Try to find existing document by orderId (if razorpayOrderId present)
@@ -174,10 +209,10 @@ export default async ({ req, res, log, error }) => {
         // Build response
         const responsePayload = {
             success: true,
-            paymentMethod,
+            payment_method,
             orderId: razorpayOrderId || (savedOrderDoc && savedOrderDoc.orderId) || null,
-            amount: paymentMethod === "razorpay" ? razorpayAmountPaise : Math.round(Number(amount || 0) * 100),
-            currency,
+            amount: payment_method === "razorpay" ? razorpayAmountPaise : Math.round(Number(amount || 0) * 100),
+            currency: razorpayCurrency,
             razorpayOrder: razorpayOrder || null,
             savedOrderDoc: savedOrderDoc || null,
         };
