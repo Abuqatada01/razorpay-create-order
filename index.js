@@ -211,7 +211,8 @@ export default async ({ req, res, log, error }) => {
                     status: pm === "cod" ? "pending" : "created",
 
                     // shipping (array) - required
-                    shipping: shippingArray,
+                    shipping: JSON.stringify(shippingArray).slice(0, 999), // enforce Appwrite limit
+
 
                     // flattened shipping fields (use the exact column names you have)
                     shipping_full_name,
