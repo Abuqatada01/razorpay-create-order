@@ -117,7 +117,7 @@ module.exports = async ({ req, res, log, error }) => {
             shipping,
             verification_raw: null,
             order_id: razorpayOrder.receipt || null,
-            receipt_local: receipt,
+            // receipt_local: receipt,
             //   createdAt: nowISO(),
             //   updatedAt: nowISO(),
             razorpay_order: razorpayOrder,
