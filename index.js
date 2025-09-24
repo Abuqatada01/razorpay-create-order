@@ -1,6 +1,6 @@
 // createOrder.js (Appwrite Function)
-// - Adds 'size' (and productId/productName/quantity) to the Appwrite order document
-// - Uses Appwrite Function runtime endpoint/project and req.headers['x-appwrite-key'] for auth.
+// - Converts item objects to string form for Appwrite schema compatibility
+// - Keeps items_json for convenience and items_string fallback
 
 const Razorpay = require("razorpay");
 const sdk = require("node-appwrite");
@@ -35,7 +35,7 @@ module.exports = async ({ req, res, log, error }) => {
     try {
         log("⚡ Create-Order started (function runtime)");
 
-        // sanity checks (trimmed)
+        // minimal sanity checks
         const missing = [];
         if (!process.env.RAZORPAY_KEY_ID) missing.push("RAZORPAY_KEY_ID");
         if (!process.env.RAZORPAY_KEY_SECRET) missing.push("RAZORPAY_KEY_SECRET");
@@ -62,22 +62,35 @@ module.exports = async ({ req, res, log, error }) => {
             return res.json({ success: false, message: "Valid amount required" }, 400);
         }
 
-        // normalize items - expect array; use first item for size/product-level attributes
+        // normalize items
         const itemsArr = Array.isArray(items) ? items : items ? [items] : [];
+        // Appwrite schema expects string items (or single string). Convert each object -> JSON string
+        const items_for_appwrite = itemsArr.map((it) => {
+            if (typeof it === "string") return it;
+            try {
+                const json = JSON.stringify(it);
+                // truncate long strings to 9999 chars to satisfy Appwrite limit (if needed)
+                return json.length > 9999 ? json.slice(0, 9999) : json;
+            } catch {
+                return String(it).slice(0, 9999);
+            }
+        });
+
+        // keep full JSON string too (as separate field)
+        const items_json = JSON.stringify(itemsArr || []);
+
+        // also provide a single items_string fallback (if collection expects single string)
+        const items_string = items_json.length > 9999 ? items_json.slice(0, 9999) : items_json;
+
+        // derive first item fields and size (if needed)
         const firstItem = itemsArr[0] || null;
-
-        // derive fields required by your schema
-        // Appwrite complained about missing "size" attribute — include it (fallback "N/A")
         const sizeValue = firstItem && ("size" in firstItem) ? (firstItem.size ?? "N/A") : "N/A";
-        const productId = firstItem && firstItem.productId ? firstItem.productId : null;
-        const productName = firstItem && firstItem.name ? firstItem.name : null;
-        const quantity = firstItem && firstItem.quantity ? Number(firstItem.quantity) : (itemsArr.length || 0);
 
-        const amountNumber = Number(amount); // rupees expected from client
+        const amountNumber = Number(amount); // rupees
         const amountPaise = Math.round(amountNumber * 100);
         const receipt = `order_rcpt_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-        // Create Razorpay order
+        // create razorpay order
         const razorpay = createRazorpayClient(process.env);
         log("Creating Razorpay order:", { amountPaise, currency, receipt });
 
@@ -85,22 +98,20 @@ module.exports = async ({ req, res, log, error }) => {
             amount: amountPaise,
             currency,
             receipt,
-            // payment_capture: 1,
         });
 
         log("✅ Razorpay order created:", razorpayOrder && razorpayOrder.id);
 
-        // Build order document including required 'size'
+        // order document: set `items` field to array-of-strings (items_for_appwrite),
+        // keep items_json and items_string for compatibility
         const orderDoc = {
             userId: userId || null,
-            // productId,
-            // productName,
-            // quantity,
-            size: sizeValue, // <-- required attribute added here
-            items: itemsArr,
-            items_json: JSON.stringify(itemsArr || []),
+            size: sizeValue,
+            items: items_for_appwrite,     // array of strings (each <= 9999 chars)
+            items_json,                   // full JSON string
+            items_string: items_string,   // fallback single string truncated <=9999
             amount: amountNumber,
-            // amountPaise,
+            amountPaise,
             currency,
             razorpay_order_id: razorpayOrder.id,
             razorpay_payment_id: null,
@@ -117,13 +128,11 @@ module.exports = async ({ req, res, log, error }) => {
             shipping,
             verification_raw: null,
             order_id: razorpayOrder.receipt || null,
-            // receipt_local: receipt,
             //   createdAt: nowISO(),
             //   updatedAt: nowISO(),
-            // razorpay_order: razorpayOrder,
         };
 
-        // Save to Appwrite Database
+        // Save to Appwrite
         const { databases } = createAppwriteClient(req);
         const databaseId = process.env.APPWRITE_DATABASE_ID || "default";
         const collectionId = process.env.APPWRITE_ORDERS_COLLECTION_ID || process.env.ORDERS_COLLECTION_ID;
