@@ -1,5 +1,5 @@
 // createOrder.js (Appwrite Function)
-// - Creates a Razorpay order and saves a corresponding document to Appwrite Database.
+// - Adds 'size' (and productId/productName/quantity) to the Appwrite order document
 // - Uses Appwrite Function runtime endpoint/project and req.headers['x-appwrite-key'] for auth.
 
 const Razorpay = require("razorpay");
@@ -22,41 +22,28 @@ const createRazorpayClient = (env) =>
         key_secret: env.RAZORPAY_KEY_SECRET,
     });
 
-// create Appwrite client using Function runtime vars + request header key
 const createAppwriteClient = (req) => {
     const client = new sdk.Client();
-
-    // Appwrite Function runtime provides these env vars
     const endpoint = process.env.APPWRITE_FUNCTION_ENDPOINT || process.env.APPWRITE_ENDPOINT || "";
     const project = process.env.APPWRITE_FUNCTION_PROJECT_ID || process.env.APPWRITE_PROJECT_ID || "";
-
-    // The function runtime passes the API key in the request headers as x-appwrite-key
     const keyFromHeader = req && req.headers ? (req.headers["x-appwrite-key"] || req.headers["X-Appwrite-Key"] || "") : "";
-
     client.setEndpoint(endpoint).setProject(project).setKey(keyFromHeader);
-
-    return {
-        client,
-        databases: new sdk.Databases(client),
-    };
+    return { client, databases: new sdk.Databases(client) };
 };
 
 module.exports = async ({ req, res, log, error }) => {
     try {
         log("⚡ Create-Order started (function runtime)");
 
-        // quick env & header sanity checks
+        // sanity checks (trimmed)
         const missing = [];
         if (!process.env.RAZORPAY_KEY_ID) missing.push("RAZORPAY_KEY_ID");
         if (!process.env.RAZORPAY_KEY_SECRET) missing.push("RAZORPAY_KEY_SECRET");
         if (!process.env.APPWRITE_FUNCTION_ENDPOINT && !process.env.APPWRITE_ENDPOINT) missing.push("APPWRITE_FUNCTION_ENDPOINT/APPWRITE_ENDPOINT");
         if (!process.env.APPWRITE_FUNCTION_PROJECT_ID && !process.env.APPWRITE_PROJECT_ID) missing.push("APPWRITE_FUNCTION_PROJECT_ID/APPWRITE_PROJECT_ID");
         if (!process.env.APPWRITE_ORDERS_COLLECTION_ID && !process.env.ORDERS_COLLECTION_ID) missing.push("APPWRITE_ORDERS_COLLECTION_ID/ORDERS_COLLECTION_ID");
-
-        // Check header key presence (Appwrite runtime should provide it)
         const headerKey = req && req.headers ? (req.headers["x-appwrite-key"] || req.headers["X-Appwrite-Key"]) : null;
         if (!headerKey) missing.push("x-appwrite-key (request header)");
-
         if (missing.length) {
             const msg = `Missing required configuration: ${missing.join(", ")}`;
             error(msg);
@@ -75,33 +62,44 @@ module.exports = async ({ req, res, log, error }) => {
             return res.json({ success: false, message: "Valid amount required" }, 400);
         }
 
-        // Convert rupees -> paise (server expects rupees input)
-        const amountNumber = Number(amount);
-        const amountPaise = Math.round(amountNumber * 100);
+        // normalize items - expect array; use first item for size/product-level attributes
+        const itemsArr = Array.isArray(items) ? items : items ? [items] : [];
+        const firstItem = itemsArr[0] || null;
 
-        // build receipt
+        // derive fields required by your schema
+        // Appwrite complained about missing "size" attribute — include it (fallback "N/A")
+        const sizeValue = firstItem && ("size" in firstItem) ? (firstItem.size ?? "N/A") : "N/A";
+        const productId = firstItem && firstItem.productId ? firstItem.productId : null;
+        const productName = firstItem && firstItem.name ? firstItem.name : null;
+        const quantity = firstItem && firstItem.quantity ? Number(firstItem.quantity) : (itemsArr.length || 0);
+
+        const amountNumber = Number(amount); // rupees expected from client
+        const amountPaise = Math.round(amountNumber * 100);
         const receipt = `order_rcpt_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
         // Create Razorpay order
         const razorpay = createRazorpayClient(process.env);
-
         log("Creating Razorpay order:", { amountPaise, currency, receipt });
 
         const razorpayOrder = await razorpay.orders.create({
             amount: amountPaise,
             currency,
             receipt,
-            // payment_capture: 1, // optional config
+            // payment_capture: 1,
         });
 
         log("✅ Razorpay order created:", razorpayOrder && razorpayOrder.id);
 
-        // Build order document
+        // Build order document including required 'size'
         const orderDoc = {
             userId: userId || null,
-            items: Array.isArray(items) ? items : items ? [items] : [],
-            items_json: JSON.stringify(items || []),
-            amount: amountNumber, // rupees
+            productId,
+            productName,
+            quantity,
+            size: sizeValue, // <-- required attribute added here
+            items: itemsArr,
+            items_json: JSON.stringify(itemsArr || []),
+            amount: amountNumber,
             amountPaise,
             currency,
             razorpay_order_id: razorpayOrder.id,
@@ -120,27 +118,22 @@ module.exports = async ({ req, res, log, error }) => {
             verification_raw: null,
             order_id: razorpayOrder.receipt || null,
             receipt_local: receipt,
-            // createdAt: nowISO(),
-            // updatedAt: nowISO(),
+            //   createdAt: nowISO(),
+            //   updatedAt: nowISO(),
             razorpay_order: razorpayOrder,
         };
 
         // Save to Appwrite Database
         const { databases } = createAppwriteClient(req);
-
         const databaseId = process.env.APPWRITE_DATABASE_ID || "default";
         const collectionId = process.env.APPWRITE_ORDERS_COLLECTION_ID || process.env.ORDERS_COLLECTION_ID;
-
         if (!collectionId) {
             const msg = "Server misconfiguration: APPWRITE_ORDERS_COLLECTION_ID or ORDERS_COLLECTION_ID missing";
             error(msg);
             return res.json({ success: false, error: msg }, 500);
         }
 
-        // generate id safely for SDK versions that require it
         const documentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-
-        // create document
         const createdDoc = await databases.createDocument(databaseId, collectionId, documentId, orderDoc);
 
         log("✅ Order saved to Appwrite:", createdDoc.$id);
