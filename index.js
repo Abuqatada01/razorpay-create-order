@@ -112,17 +112,17 @@ module.exports = async ({ req, res, log, error }) => {
 
         // Save to Appwrite Database
         // Required env vars:
-        // APPWRITE_ENDPOINT, APPWRITE_PROJECT, APPWRITE_API_KEY, APPWRITE_DATABASE_ID, ORDERS_COLLECTION_ID
+        // APPWRITE_ENDPOINT, APPWRITE_PROJECT, APPWRITE_API_KEY, APPWRITE_DATABASE_ID, APPWRITE_ORDERS_COLLECTION_ID
         const {
             client: appwriteClient,
             databases,
         } = createAppwriteClient();
 
         const databaseId = env.APPWRITE_DATABASE_ID || "default";
-        const collectionId = env.ORDERS_COLLECTION_ID;
+        const collectionId = env.APPWRITE_ORDERS_COLLECTION_ID;
         if (!collectionId) {
-            error("Missing ORDERS_COLLECTION_ID env var");
-            return res.json({ success: false, message: "Server misconfiguration: ORDERS_COLLECTION_ID missing" }, 500);
+            error("Missing APPWRITE_ORDERS_COLLECTION_ID env var");
+            return res.json({ success: false, message: "Server misconfiguration: APPWRITE_ORDERS_COLLECTION_ID missing" }, 500);
         }
 
         log("Saving order to Appwrite:", { databaseId, collectionId });
