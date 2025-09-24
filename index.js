@@ -109,7 +109,7 @@ module.exports = async ({ req, res, log, error }) => {
             size: sizeValue,
             items: items_for_appwrite,     // array of strings (each <= 9999 chars)
             items_json,                   // full JSON string
-            items_string: items_string,   // fallback single string truncated <=9999
+            // items_string: items_string,   // fallback single string truncated <=9999
             amount: amountNumber,
             amountPaise,
             currency,
