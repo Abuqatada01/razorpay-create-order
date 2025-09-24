@@ -93,14 +93,14 @@ module.exports = async ({ req, res, log, error }) => {
         // Build order document including required 'size'
         const orderDoc = {
             userId: userId || null,
-            productId,
-            productName,
-            quantity,
+            // productId,
+            // productName,
+            // quantity,
             size: sizeValue, // <-- required attribute added here
             items: itemsArr,
             items_json: JSON.stringify(itemsArr || []),
             amount: amountNumber,
-            amountPaise,
+            // amountPaise,
             currency,
             razorpay_order_id: razorpayOrder.id,
             razorpay_payment_id: null,
