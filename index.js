@@ -1,7 +1,4 @@
-// createOrder.js (Appwrite Function) - defensive + debug-friendly (patched)
-// - Converts shipping object -> shipping_json (string <= 999 chars)
-// - Ensures items string exists and <= 999 chars
-// - Fallback DOES NOT delete required 'items' attribute
+// createOrder.js (Appwrite Function) - patched: sanitize postal code + safe fallback
 const Razorpay = require("razorpay");
 const sdk = require("node-appwrite");
 
@@ -29,6 +26,24 @@ const createAppwriteClient = (req) => {
     const keyFromHeader = req && req.headers ? (req.headers["x-appwrite-key"] || req.headers["X-Appwrite-Key"] || "") : "";
     client.setEndpoint(endpoint).setProject(project).setKey(keyFromHeader);
     return { client, databases: new sdk.Databases(client) };
+};
+
+// Helper: coerce postal code to integer or return null
+const sanitizePostalCode = (raw) => {
+    if (raw === undefined || raw === null) return null;
+    // If already a number and integer
+    if (typeof raw === "number" && Number.isInteger(raw)) return raw;
+    // If string, strip non-digit characters and parse
+    const digits = String(raw).replace(/\D+/g, "");
+    if (!digits) return null;
+    // Trim leading zeros? Keep them (postal codes can start with 0); parseInt will drop leading zeros but Appwrite integer expects numeric.
+    try {
+        const n = parseInt(digits, 10);
+        if (Number.isNaN(n)) return null;
+        return n;
+    } catch {
+        return null;
+    }
 };
 
 module.exports = async ({ req, res, log, error }) => {
@@ -73,7 +88,7 @@ module.exports = async ({ req, res, log, error }) => {
                 if (!it || typeof it !== "object") return String(it);
                 return {
                     productId: it.productId ?? it.id ?? null,
-                    name: it.name ?? it.productName ?? null,
+                    name: it.name ?? it.productName ?? it.title ?? null,
                     qty: it.quantity ?? it.qty ?? 1,
                     size: it.size ?? null,
                     price: it.price ?? null,
@@ -123,6 +138,11 @@ module.exports = async ({ req, res, log, error }) => {
         }
         if (shipping_json.length > 999) shipping_json = shipping_json.slice(0, 999);
 
+        // Sanitize postal code to integer as Appwrite expects integer type
+        const shipping_postal_code_int = sanitizePostalCode(
+            shipping && (shipping.postal_code || shipping.zip || shipping.postal || shipping.postcode)
+        );
+
         // Prepare primary appwrite document payload (matching collection schema expecting items as string)
         const orderDocPrimary = {
             userId: userId || null,
@@ -138,13 +158,14 @@ module.exports = async ({ req, res, log, error }) => {
             status: "created",
             receipt,
             payment_method: payment_method || null,
+            // flattened shipping fields (coerced/types aligned)
             shipping_full_name: (shipping && (shipping.full_name || shipping.name)) || null,
             shipping_phone: (shipping && (shipping.phone || shipping.mobile)) || null,
             shipping_line_1: (shipping && (shipping.line_1 || shipping.address_line1 || shipping.address1)) || null,
             shipping_city: (shipping && (shipping.city || shipping.town)) || null,
-            shipping_postal_code: (shipping && (shipping.postal_code || shipping.zip || shipping.postcode)) || null,
+            shipping_postal_code: shipping_postal_code_int, // integer or null
             shipping_country: (shipping && shipping.country) || null,
-            // remove shipping object to avoid Appwrite type error; store JSON string instead
+            // store JSON string separately (string <= 999)
             shipping_json, // safe string representation (truncated to 999)
             verification_raw: null,
             order_id: razorpayOrder.receipt || null,
@@ -156,6 +177,7 @@ module.exports = async ({ req, res, log, error }) => {
         log("items (type, length):", typeof orderDocPrimary.items, orderDocPrimary.items ? orderDocPrimary.items.length : 0);
         log("items_json length:", orderDocPrimary.items_json ? orderDocPrimary.items_json.length : 0);
         log("shipping_json (type, length):", typeof orderDocPrimary.shipping_json, orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.length : 0);
+        log("shipping_postal_code (type, value):", typeof orderDocPrimary.shipping_postal_code, orderDocPrimary.shipping_postal_code);
 
         const { databases } = createAppwriteClient(req);
         const databaseId = process.env.APPWRITE_DATABASE_ID || "default";
@@ -180,15 +202,11 @@ module.exports = async ({ req, res, log, error }) => {
                 items_len: orderDocPrimary.items ? orderDocPrimary.items.length : 0,
                 shipping_sample: orderDocPrimary.shipping_json && orderDocPrimary.shipping_json.substring(0, 200),
                 shipping_len: orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.length : 0,
+                shipping_postal_code: orderDocPrimary.shipping_postal_code,
             }));
 
-            // fallback attempt: keep `items` (required) but add alternate helper fields
+            // fallback attempt: RETRY the same sanitized payload (do not add unknown attributes)
             const orderDocFallback = { ...orderDocPrimary };
-            // DO NOT delete orderDocFallback.items (collection expects it). Instead add helpers:
-            orderDocFallback.items_summary_alt = items_summary_string; // optional helper field
-            // Keep shipping_json in place; add shipping_fallback if needed
-            orderDocFallback.shipping_summary = orderDocFallback.shipping_json && orderDocFallback.shipping_json.substring(0, 500);
-
             const fallbackDocumentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
             try {
@@ -197,8 +215,8 @@ module.exports = async ({ req, res, log, error }) => {
                 return res.json({
                     success: true,
                     razorpay: { orderId: razorpayOrder.id, amount: razorpayOrder.amount, currency: razorpayOrder.currency, receipt: razorpayOrder.receipt },
-                    appwrite: { documentId: createdFallback.$id, used: "fallback_items_summary" },
-                    warning: "Primary create failed; fallback with items_summary_alt succeeded. Consider updating collection schema to accept items as text or rename attribute.",
+                    appwrite: { documentId: createdFallback.$id, used: "fallback_same_payload" },
+                    warning: "Primary create failed; fallback succeeded using same sanitized payload. Consider updating collection schema if errors persist.",
                     primaryError: createErrMsg,
                 }, 201);
             } catch (fallbackErr) {
@@ -214,14 +232,13 @@ module.exports = async ({ req, res, log, error }) => {
                         sample: orderDocPrimary.items ? orderDocPrimary.items.slice(0, 200) : null,
                         shipping_json_length: orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.length : 0,
                         shipping_sample: orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.slice(0, 200) : null,
+                        shipping_postal_code: orderDocPrimary.shipping_postal_code,
                         error: createErrMsg,
                     },
                     fallbackAttempt: {
-                        items_summary_length: items_summary_string.length,
-                        sample: items_summary_string.slice(0, 200),
                         error: fallbackErrMsg,
                     },
-                    guidance: "Check collection schema attributes: name, type, and max length for 'items' and 'shipping'. If possible make them text (longer) or optional, or accept objects as JSON strings. Also ensure 'items' is not required if you plan to store alternate field names.",
+                    guidance: "Check collection schema attributes: name, type, and format for shipping_postal_code and other shipping_* fields. If shipping_postal_code should accept strings, change schema to text; otherwise ensure you pass an integer. Also ensure no unknown attributes are being sent.",
                 }, 500);
             }
         }
