@@ -18,7 +18,7 @@ const createAppwriteClient = () => {
     client
         .setEndpoint(env.APPWRITE_ENDPOINT) // e.g. https://[HOSTNAME]/v1
         .setProject(env.APPWRITE_PROJECT) // project id
-        .setKey(env.APPWRITE_API_KEY); // server API key
+        .setKey(req.headers['x-appwrite-key']);
 
     return {
         client,
