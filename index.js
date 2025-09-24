@@ -1,6 +1,6 @@
 // createOrder.js (Appwrite Function)
-// - Converts item objects to string form for Appwrite schema compatibility
-// - Keeps items_json for convenience and items_string fallback
+// - Ensures `items` matches Appwrite schema: single string <= 999 chars.
+// - Uses Appwrite Function runtime auth via x-appwrite-key header.
 
 const Razorpay = require("razorpay");
 const sdk = require("node-appwrite");
@@ -35,7 +35,7 @@ module.exports = async ({ req, res, log, error }) => {
     try {
         log("⚡ Create-Order started (function runtime)");
 
-        // minimal sanity checks
+        // basic config checks
         const missing = [];
         if (!process.env.RAZORPAY_KEY_ID) missing.push("RAZORPAY_KEY_ID");
         if (!process.env.RAZORPAY_KEY_SECRET) missing.push("RAZORPAY_KEY_SECRET");
@@ -62,31 +62,40 @@ module.exports = async ({ req, res, log, error }) => {
             return res.json({ success: false, message: "Valid amount required" }, 400);
         }
 
-        // normalize items
+        // Normalize items into an array
         const itemsArr = Array.isArray(items) ? items : items ? [items] : [];
-        // Appwrite schema expects string items (or single string). Convert each object -> JSON string
-        const items_for_appwrite = itemsArr.map((it) => {
-            if (typeof it === "string") return it;
-            try {
-                const json = JSON.stringify(it);
-                // truncate long strings to 9999 chars to satisfy Appwrite limit (if needed)
-                return json.length > 9999 ? json.slice(0, 9999) : json;
-            } catch {
-                return String(it).slice(0, 9999);
-            }
-        });
 
-        // keep full JSON string too (as separate field)
+        // Full JSON for internal use (not for the 'items' attribute if schema limits length/type)
         const items_json = JSON.stringify(itemsArr || []);
 
-        // also provide a single items_string fallback (if collection expects single string)
-        const items_string = items_json.length > 9999 ? items_json.slice(0, 9999) : items_json;
+        // Appwrite collection expects 'items' as a single string <= 999 chars.
+        // Build a compact string representation and truncate to 999 chars to satisfy schema.
+        // You can change the shape here if you prefer a different summary format.
+        let items_string = "";
+        try {
+            // Prefer a compact summary: array of {productId,name,qty,size}
+            const summary = itemsArr.map((it) => {
+                if (!it || typeof it !== "object") return String(it);
+                return {
+                    productId: it.productId ?? it.id ?? null,
+                    name: it.name ?? it.productName ?? null,
+                    qty: it.quantity ?? it.qty ?? 1,
+                    size: it.size ?? null,
+                    price: it.price ?? null,
+                };
+            });
+            items_string = JSON.stringify(summary);
+        } catch (e) {
+            items_string = items_json;
+        }
+        // enforce Appwrite 999 char limit (use 999 exactly)
+        if (items_string.length > 999) items_string = items_string.slice(0, 999);
 
-        // derive first item fields and size (if needed)
+        // derive first item fields and required 'size' (fallback)
         const firstItem = itemsArr[0] || null;
         const sizeValue = firstItem && ("size" in firstItem) ? (firstItem.size ?? "N/A") : "N/A";
 
-        const amountNumber = Number(amount); // rupees
+        const amountNumber = Number(amount); // rupees from client
         const amountPaise = Math.round(amountNumber * 100);
         const receipt = `order_rcpt_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
@@ -102,14 +111,14 @@ module.exports = async ({ req, res, log, error }) => {
 
         log("✅ Razorpay order created:", razorpayOrder && razorpayOrder.id);
 
-        // order document: set `items` field to array-of-strings (items_for_appwrite),
-        // keep items_json and items_string for compatibility
+        // Build order document where `items` is a single string (<=999 chars)
         const orderDoc = {
             userId: userId || null,
             size: sizeValue,
-            items: items_for_appwrite,     // array of strings (each <= 9999 chars)
-            items_json,                   // full JSON string
-            // items_string: items_string,   // fallback single string truncated <=9999
+            // Appwrite schema expects a string for 'items' attribute:
+            items: items_string,
+            // keep the full JSON separately if you want (may not be a schema attribute)
+            items_json,
             amount: amountNumber,
             amountPaise,
             currency,
@@ -128,8 +137,8 @@ module.exports = async ({ req, res, log, error }) => {
             shipping,
             verification_raw: null,
             order_id: razorpayOrder.receipt || null,
-            //   createdAt: nowISO(),
-            //   updatedAt: nowISO(),
+            // createdAt: nowISO(),
+            // updatedAt: nowISO(),
         };
 
         // Save to Appwrite
@@ -142,6 +151,7 @@ module.exports = async ({ req, res, log, error }) => {
             return res.json({ success: false, error: msg }, 500);
         }
 
+        // createDocument requires an id in some SDK versions
         const documentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
         const createdDoc = await databases.createDocument(databaseId, collectionId, documentId, orderDoc);
 
