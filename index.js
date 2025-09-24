@@ -1,4 +1,4 @@
-// createOrder.js (Appwrite Function) - patched: sanitize postal code + safe fallback
+// createOrder.js - stricter sanitization + whitelist to avoid unknown attrs and format errors
 const Razorpay = require("razorpay");
 const sdk = require("node-appwrite");
 
@@ -10,8 +10,6 @@ const parseJSON = (input) => {
         return {};
     }
 };
-
-const nowISO = () => new Date().toISOString();
 
 const createRazorpayClient = (env) =>
     new Razorpay({
@@ -31,24 +29,24 @@ const createAppwriteClient = (req) => {
 // Helper: coerce postal code to integer or return null
 const sanitizePostalCode = (raw) => {
     if (raw === undefined || raw === null) return null;
-    // If already a number and integer
     if (typeof raw === "number" && Number.isInteger(raw)) return raw;
-    // If string, strip non-digit characters and parse
     const digits = String(raw).replace(/\D+/g, "");
     if (!digits) return null;
-    // Trim leading zeros? Keep them (postal codes can start with 0); parseInt will drop leading zeros but Appwrite integer expects numeric.
-    try {
-        const n = parseInt(digits, 10);
-        if (Number.isNaN(n)) return null;
-        return n;
-    } catch {
-        return null;
-    }
+    const n = parseInt(digits, 10);
+    if (Number.isNaN(n)) return null;
+    return n;
+};
+
+// Helper: truncate string safely
+const trunc = (s, n) => {
+    if (s === undefined || s === null) return null;
+    const str = typeof s === "string" ? s : JSON.stringify(s);
+    return str.length > n ? str.slice(0, n) : str;
 };
 
 module.exports = async ({ req, res, log, error }) => {
     try {
-        log("⚡ Create-Order started (defensive)");
+        log("⚡ Create-Order started (defensive, whitelist)");
 
         // Basic required config check
         const missing = [];
@@ -70,7 +68,6 @@ module.exports = async ({ req, res, log, error }) => {
             return res.json({ success: false, message: `Method ${req.method} not allowed` }, 405);
         }
 
-        // Parse incoming body (defensive)
         const bodyData = parseJSON(req.bodyRaw || req.body || "{}");
         const { amount, currency = "INR", userId, items, shipping = {}, payment_method } = bodyData;
 
@@ -78,10 +75,8 @@ module.exports = async ({ req, res, log, error }) => {
             return res.json({ success: false, message: "Valid amount required" }, 400);
         }
 
-        // Normalize items into an array
+        // items normalization and compact string
         const itemsArr = Array.isArray(items) ? items : items ? [items] : [];
-
-        // Build compact summary for Appwrite 'items' attribute (collection expects single string <=999)
         let items_summary_string = "";
         try {
             const summaryArray = itemsArr.map((it) => {
@@ -95,21 +90,15 @@ module.exports = async ({ req, res, log, error }) => {
                 };
             });
             items_summary_string = JSON.stringify(summaryArray);
-        } catch (e) {
+        } catch {
             items_summary_string = JSON.stringify(itemsArr);
         }
-        // truncate to 999 chars (strict)
-        if (items_summary_string.length > 999) items_summary_string = items_summary_string.slice(0, 999);
-
-        // Also keep full JSON in items_json (not used for Appwrite attribute validation)
-        const items_json = JSON.stringify(itemsArr || []);
-
-        // Ensure items_summary_string presence (schema requires items)
         if (!items_summary_string || items_summary_string === "[]") {
-            items_summary_string = JSON.stringify([{ name: "unknown", qty: 1 }]).slice(0, 999);
+            items_summary_string = JSON.stringify([{ name: "unknown", qty: 1 }]);
         }
+        if (items_summary_string.length > 999) items_summary_string = items_summary_string.slice(0, 999);
+        const items_json = trunc(itemsArr, 2000) || "[]";
 
-        // Extract size from first item if present
         const firstItem = itemsArr[0] || null;
         const sizeValue = firstItem && ("size" in firstItem) ? (firstItem.size ?? "N/A") : "N/A";
 
@@ -117,7 +106,6 @@ module.exports = async ({ req, res, log, error }) => {
         const amountPaise = Math.round(amountNumber * 100);
         const receipt = `order_rcpt_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-        // Create Razorpay order
         const razorpay = createRazorpayClient(process.env);
         log("Creating Razorpay order", { amountPaise, currency, receipt });
 
@@ -129,7 +117,7 @@ module.exports = async ({ req, res, log, error }) => {
 
         log("Razorpay order created:", razorpayOrder && razorpayOrder.id);
 
-        // --- Ensure shipping and items are stored in schema-friendly types ---
+        // shipping json truncated
         let shipping_json = "";
         try {
             shipping_json = typeof shipping === "string" ? shipping : JSON.stringify(shipping || {});
@@ -138,17 +126,17 @@ module.exports = async ({ req, res, log, error }) => {
         }
         if (shipping_json.length > 999) shipping_json = shipping_json.slice(0, 999);
 
-        // Sanitize postal code to integer as Appwrite expects integer type
+        // sanitize postal code — only include if valid integer
         const shipping_postal_code_int = sanitizePostalCode(
             shipping && (shipping.postal_code || shipping.zip || shipping.postal || shipping.postcode)
         );
 
-        // Prepare primary appwrite document payload (matching collection schema expecting items as string)
-        const orderDocPrimary = {
+        // Build a whitelist of allowed fields for Appwrite document
+        const allowed = {
             userId: userId || null,
             size: sizeValue,
-            items: items_summary_string, // single string <=999 chars — ensure present
-            items_json,
+            items: items_summary_string,
+            items_json: items_json,
             amount: amountNumber,
             amountPaise,
             currency,
@@ -158,87 +146,81 @@ module.exports = async ({ req, res, log, error }) => {
             status: "created",
             receipt,
             payment_method: payment_method || null,
-            // flattened shipping fields (coerced/types aligned)
             shipping_full_name: (shipping && (shipping.full_name || shipping.name)) || null,
             shipping_phone: (shipping && (shipping.phone || shipping.mobile)) || null,
             shipping_line_1: (shipping && (shipping.line_1 || shipping.address_line1 || shipping.address1)) || null,
             shipping_city: (shipping && (shipping.city || shipping.town)) || null,
-            shipping_postal_code: shipping_postal_code_int, // integer or null
+            // shipping_postal_code intentionally added only if valid integer below
             shipping_country: (shipping && shipping.country) || null,
-            // store JSON string separately (string <= 999)
-            shipping_json, // safe string representation (truncated to 999)
+            shipping_json,
             verification_raw: null,
             order_id: razorpayOrder.receipt || null,
-            // createdAt/updatedAt intentionally not added (Appwrite uses $createdAt / $updatedAt)
         };
 
-        // Debug log: what we will send (no secrets)
-        log("Prepared order document (primary) keys:", Object.keys(orderDocPrimary));
-        log("items (type, length):", typeof orderDocPrimary.items, orderDocPrimary.items ? orderDocPrimary.items.length : 0);
-        log("items_json length:", orderDocPrimary.items_json ? orderDocPrimary.items_json.length : 0);
-        log("shipping_json (type, length):", typeof orderDocPrimary.shipping_json, orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.length : 0);
-        log("shipping_postal_code (type, value):", typeof orderDocPrimary.shipping_postal_code, orderDocPrimary.shipping_postal_code);
+        // Only set shipping_postal_code if it's valid integer
+        if (typeof shipping_postal_code_int === "number" && Number.isInteger(shipping_postal_code_int)) {
+            allowed.shipping_postal_code = shipping_postal_code_int;
+        }
+
+        // Build sanitizedDoc with only defined keys (drop undefined)
+        const sanitizedDoc = {};
+        Object.keys(allowed).forEach((k) => {
+            if (allowed[k] !== undefined) sanitizedDoc[k] = allowed[k];
+        });
+
+        // Debug log sanitizedDoc keys and lightweight samples (no secrets)
+        log("Sanitized document prepared for Appwrite:", {
+            keys: Object.keys(sanitizedDoc),
+            items_len: sanitizedDoc.items ? sanitizedDoc.items.length : 0,
+            shipping_json_len: sanitizedDoc.shipping_json ? sanitizedDoc.shipping_json.length : 0,
+            shipping_postal_code: sanitizedDoc.shipping_postal_code,
+        });
 
         const { databases } = createAppwriteClient(req);
         const databaseId = process.env.APPWRITE_DATABASE_ID || "default";
         const collectionId = process.env.APPWRITE_ORDERS_COLLECTION_ID || process.env.ORDERS_COLLECTION_ID;
         const documentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
-        // try primary create attempt
+        // Try primary create
         try {
-            const createdDoc = await databases.createDocument(databaseId, collectionId, documentId, orderDocPrimary);
-            log("Order saved to Appwrite (primary):", createdDoc.$id);
+            const created = await databases.createDocument(databaseId, collectionId, documentId, sanitizedDoc);
+            log("Order saved to Appwrite (primary):", created.$id);
             return res.json({
                 success: true,
                 razorpay: { orderId: razorpayOrder.id, amount: razorpayOrder.amount, currency: razorpayOrder.currency, receipt: razorpayOrder.receipt },
-                appwrite: { documentId: createdDoc.$id, used: "primary" },
+                appwrite: { documentId: created.$id, used: "primary" },
             }, 201);
         } catch (createErr) {
-            // capture Appwrite error text to help debug
             const createErrMsg = createErr && createErr.message ? String(createErr.message) : String(createErr);
             error("Appwrite createDocument primary failed: " + createErrMsg);
-            log("Primary payload (truncated) was:", JSON.stringify({
-                items_sample: orderDocPrimary.items && orderDocPrimary.items.substring(0, 200),
-                items_len: orderDocPrimary.items ? orderDocPrimary.items.length : 0,
-                shipping_sample: orderDocPrimary.shipping_json && orderDocPrimary.shipping_json.substring(0, 200),
-                shipping_len: orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.length : 0,
-                shipping_postal_code: orderDocPrimary.shipping_postal_code,
+            log("Primary sanitizedDoc sample:", JSON.stringify({
+                items_sample: sanitizedDoc.items && sanitizedDoc.items.substring(0, 200),
+                items_len: sanitizedDoc.items ? sanitizedDoc.items.length : 0,
+                shipping_json_sample: sanitizedDoc.shipping_json && sanitizedDoc.shipping_json.substring(0, 200),
+                shipping_postal_code: sanitizedDoc.shipping_postal_code,
             }));
 
-            // fallback attempt: RETRY the same sanitized payload (do not add unknown attributes)
-            const orderDocFallback = { ...orderDocPrimary };
-            const fallbackDocumentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-
+            // Fallback: retry the exact same sanitizedDoc with a different id
+            const fallbackId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
             try {
-                const createdFallback = await databases.createDocument(databaseId, collectionId, fallbackDocumentId, orderDocFallback);
+                const createdFallback = await databases.createDocument(databaseId, collectionId, fallbackId, sanitizedDoc);
                 log("Order saved to Appwrite (fallback):", createdFallback.$id);
                 return res.json({
                     success: true,
                     razorpay: { orderId: razorpayOrder.id, amount: razorpayOrder.amount, currency: razorpayOrder.currency, receipt: razorpayOrder.receipt },
                     appwrite: { documentId: createdFallback.$id, used: "fallback_same_payload" },
-                    warning: "Primary create failed; fallback succeeded using same sanitized payload. Consider updating collection schema if errors persist.",
+                    warning: "Primary create failed; fallback succeeded using sanitized payload.",
                     primaryError: createErrMsg,
                 }, 201);
             } catch (fallbackErr) {
                 const fallbackErrMsg = fallbackErr && fallbackErr.message ? String(fallbackErr.message) : String(fallbackErr);
                 error("Appwrite createDocument fallback failed: " + fallbackErrMsg);
-                // Return detailed diagnostics (no secrets) so you can paste into next message
                 return res.json({
                     success: false,
-                    error: "Appwrite createDocument failed for both primary and fallback payloads.",
-                    primaryAttempt: {
-                        items_type: typeof orderDocPrimary.items,
-                        items_length: orderDocPrimary.items ? orderDocPrimary.items.length : 0,
-                        sample: orderDocPrimary.items ? orderDocPrimary.items.slice(0, 200) : null,
-                        shipping_json_length: orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.length : 0,
-                        shipping_sample: orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.slice(0, 200) : null,
-                        shipping_postal_code: orderDocPrimary.shipping_postal_code,
-                        error: createErrMsg,
-                    },
-                    fallbackAttempt: {
-                        error: fallbackErrMsg,
-                    },
-                    guidance: "Check collection schema attributes: name, type, and format for shipping_postal_code and other shipping_* fields. If shipping_postal_code should accept strings, change schema to text; otherwise ensure you pass an integer. Also ensure no unknown attributes are being sent.",
+                    error: "Appwrite createDocument failed for both primary and fallback attempts.",
+                    primaryAttempt: { error: createErrMsg, sample: sanitizedDoc.items && sanitizedDoc.items.slice(0, 200) },
+                    fallbackAttempt: { error: fallbackErrMsg },
+                    guidance: "Verify collection schema allows these exact fields and types. If shipping_postal_code requires a different format (string leading zeros), change schema to string/text.",
                 }, 500);
             }
         }
