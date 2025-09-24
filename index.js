@@ -1,7 +1,4 @@
-// createOrder.js (Appwrite Function)
-// - Ensures `items` matches Appwrite schema: single string <= 999 chars.
-// - Uses Appwrite Function runtime auth via x-appwrite-key header.
-
+// createOrder.js (Appwrite Function) - defensive + debug-friendly
 const Razorpay = require("razorpay");
 const sdk = require("node-appwrite");
 
@@ -33,9 +30,9 @@ const createAppwriteClient = (req) => {
 
 module.exports = async ({ req, res, log, error }) => {
     try {
-        log("⚡ Create-Order started (function runtime)");
+        log("⚡ Create-Order started (defensive)");
 
-        // basic config checks
+        // Basic required config check
         const missing = [];
         if (!process.env.RAZORPAY_KEY_ID) missing.push("RAZORPAY_KEY_ID");
         if (!process.env.RAZORPAY_KEY_SECRET) missing.push("RAZORPAY_KEY_SECRET");
@@ -51,7 +48,7 @@ module.exports = async ({ req, res, log, error }) => {
         }
 
         if (req.method !== "POST") {
-            if (req.method === "GET") return res.text("🚀 Razorpay Appwrite Function is live");
+            if (req.method === "GET") return res.text("🚀 Create-Order function live");
             return res.json({ success: false, message: `Method ${req.method} not allowed` }, 405);
         }
 
@@ -62,19 +59,13 @@ module.exports = async ({ req, res, log, error }) => {
             return res.json({ success: false, message: "Valid amount required" }, 400);
         }
 
-        // Normalize items into an array
+        // Normalize items
         const itemsArr = Array.isArray(items) ? items : items ? [items] : [];
 
-        // Full JSON for internal use (not for the 'items' attribute if schema limits length/type)
-        const items_json = JSON.stringify(itemsArr || []);
-
-        // Appwrite collection expects 'items' as a single string <= 999 chars.
-        // Build a compact string representation and truncate to 999 chars to satisfy schema.
-        // You can change the shape here if you prefer a different summary format.
-        let items_string = "";
+        // Build compact summary for Appwrite 'items' attribute (collection expects single string <=999)
+        let items_summary_string = "";
         try {
-            // Prefer a compact summary: array of {productId,name,qty,size}
-            const summary = itemsArr.map((it) => {
+            const summaryArray = itemsArr.map((it) => {
                 if (!it || typeof it !== "object") return String(it);
                 return {
                     productId: it.productId ?? it.id ?? null,
@@ -84,24 +75,26 @@ module.exports = async ({ req, res, log, error }) => {
                     price: it.price ?? null,
                 };
             });
-            items_string = JSON.stringify(summary);
+            items_summary_string = JSON.stringify(summaryArray);
         } catch (e) {
-            items_string = items_json;
+            items_summary_string = JSON.stringify(itemsArr);
         }
-        // enforce Appwrite 999 char limit (use 999 exactly)
-        if (items_string.length > 999) items_string = items_string.slice(0, 999);
+        // truncate to 999 chars (strict)
+        if (items_summary_string.length > 999) items_summary_string = items_summary_string.slice(0, 999);
 
-        // derive first item fields and required 'size' (fallback)
+        // Also keep full JSON in items_json (not used for Appwrite attribute validation)
+        const items_json = JSON.stringify(itemsArr || []);
+
         const firstItem = itemsArr[0] || null;
         const sizeValue = firstItem && ("size" in firstItem) ? (firstItem.size ?? "N/A") : "N/A";
 
-        const amountNumber = Number(amount); // rupees from client
+        const amountNumber = Number(amount);
         const amountPaise = Math.round(amountNumber * 100);
         const receipt = `order_rcpt_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-        // create razorpay order
+        // Create Razorpay order
         const razorpay = createRazorpayClient(process.env);
-        log("Creating Razorpay order:", { amountPaise, currency, receipt });
+        log("Creating Razorpay order", { amountPaise, currency, receipt });
 
         const razorpayOrder = await razorpay.orders.create({
             amount: amountPaise,
@@ -109,15 +102,13 @@ module.exports = async ({ req, res, log, error }) => {
             receipt,
         });
 
-        log("✅ Razorpay order created:", razorpayOrder && razorpayOrder.id);
+        log("Razorpay order created:", razorpayOrder && razorpayOrder.id);
 
-        // Build order document where `items` is a single string (<=999 chars)
-        const orderDoc = {
+        // Primary payload: put the compact string into `items` (matching current schema expectation)
+        const orderDocPrimary = {
             userId: userId || null,
             size: sizeValue,
-            // Appwrite schema expects a string for 'items' attribute:
-            items: items_string,
-            // keep the full JSON separately if you want (may not be a schema attribute)
+            items: items_summary_string, // single string <=999 chars
             items_json,
             amount: amountNumber,
             amountPaise,
@@ -141,37 +132,73 @@ module.exports = async ({ req, res, log, error }) => {
             // updatedAt: nowISO(),
         };
 
-        // Save to Appwrite
+        // Debug log: what we will send (no secrets)
+        log("Prepared order document (primary) keys:", Object.keys(orderDocPrimary));
+        log("items (type, length):", typeof orderDocPrimary.items, orderDocPrimary.items ? orderDocPrimary.items.length : 0);
+        log("items_json length:", orderDocPrimary.items_json ? orderDocPrimary.items_json.length : 0);
+
         const { databases } = createAppwriteClient(req);
         const databaseId = process.env.APPWRITE_DATABASE_ID || "default";
         const collectionId = process.env.APPWRITE_ORDERS_COLLECTION_ID || process.env.ORDERS_COLLECTION_ID;
-        if (!collectionId) {
-            const msg = "Server misconfiguration: APPWRITE_ORDERS_COLLECTION_ID or ORDERS_COLLECTION_ID missing";
-            error(msg);
-            return res.json({ success: false, error: msg }, 500);
-        }
-
-        // createDocument requires an id in some SDK versions
         const documentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-        const createdDoc = await databases.createDocument(databaseId, collectionId, documentId, orderDoc);
 
-        log("✅ Order saved to Appwrite:", createdDoc.$id);
-
-        return res.json(
-            {
+        // try primary create attempt
+        try {
+            const createdDoc = await databases.createDocument(databaseId, collectionId, documentId, orderDocPrimary);
+            log("Order saved to Appwrite (primary):", createdDoc.$id);
+            return res.json({
                 success: true,
-                razorpay: {
-                    orderId: razorpayOrder.id,
-                    amount: razorpayOrder.amount,
-                    currency: razorpayOrder.currency,
-                    receipt: razorpayOrder.receipt,
-                },
-                appwrite: {
-                    documentId: createdDoc.$id,
-                },
-            },
-            201
-        );
+                razorpay: { orderId: razorpayOrder.id, amount: razorpayOrder.amount, currency: razorpayOrder.currency, receipt: razorpayOrder.receipt },
+                appwrite: { documentId: createdDoc.$id, used: "primary" },
+            }, 201);
+        } catch (createErr) {
+            // capture Appwrite error text to help debug
+            const createErrMsg = createErr && createErr.message ? String(createErr.message) : String(createErr);
+            error("Appwrite createDocument primary failed: " + createErrMsg);
+            log("Primary payload (truncated) was:", JSON.stringify({
+                items_sample: orderDocPrimary.items && orderDocPrimary.items.substring(0, 200),
+                items_len: orderDocPrimary.items ? orderDocPrimary.items.length : 0,
+            }));
+
+            // fallback attempt: remove `items` attribute and set a different field name (items_summary),
+            // this helps test whether Appwrite rejects the field name itself or just the value/type
+            const orderDocFallback = { ...orderDocPrimary };
+            delete orderDocFallback.items;
+            orderDocFallback.items_summary = items_summary_string; // non-schema name (safe)
+            const fallbackDocumentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+
+            try {
+                const createdFallback = await databases.createDocument(databaseId, collectionId, fallbackDocumentId, orderDocFallback);
+                log("Order saved to Appwrite (fallback):", createdFallback.$id);
+                return res.json({
+                    success: true,
+                    razorpay: { orderId: razorpayOrder.id, amount: razorpayOrder.amount, currency: razorpayOrder.currency, receipt: razorpayOrder.receipt },
+                    appwrite: { documentId: createdFallback.$id, used: "fallback_items_summary" },
+                    warning: "Primary create failed; fallback with items_summary succeeded. Consider updating collection schema to accept items as text or rename attribute.",
+                    primaryError: createErrMsg,
+                }, 201);
+            } catch (fallbackErr) {
+                const fallbackErrMsg = fallbackErr && fallbackErr.message ? String(fallbackErr.message) : String(fallbackErr);
+                error("Appwrite createDocument fallback failed: " + fallbackErrMsg);
+                // Return detailed diagnostics (no secrets) so you can paste into next message
+                return res.json({
+                    success: false,
+                    error: "Appwrite createDocument failed for both primary and fallback payloads.",
+                    primaryAttempt: {
+                        items_type: typeof orderDocPrimary.items,
+                        items_length: orderDocPrimary.items ? orderDocPrimary.items.length : 0,
+                        sample: orderDocPrimary.items ? orderDocPrimary.items.slice(0, 200) : null,
+                        error: createErrMsg,
+                    },
+                    fallbackAttempt: {
+                        items_summary_length: items_summary_string.length,
+                        sample: items_summary_string.slice(0, 200),
+                        error: fallbackErrMsg,
+                    },
+                    guidance: "Check collection schema attributes: name, type, and max length for 'items'. If possible make it text (larger) or optional, or accept objects as JSON strings.",
+                }, 500);
+            }
+        }
     } catch (err) {
         error("Critical error: " + (err && err.message ? err.message : String(err)));
         return res.json({ success: false, error: err && err.message ? err.message : String(err) }, 500);
