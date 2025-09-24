@@ -1,4 +1,7 @@
-// createOrder.js (Appwrite Function) - defensive + debug-friendly
+// createOrder.js (Appwrite Function) - defensive + debug-friendly (patched)
+// - Converts shipping object -> shipping_json (string <= 999 chars)
+// - Ensures items string exists and <= 999 chars
+// - Fallback DOES NOT delete required 'items' attribute
 const Razorpay = require("razorpay");
 const sdk = require("node-appwrite");
 
@@ -52,6 +55,7 @@ module.exports = async ({ req, res, log, error }) => {
             return res.json({ success: false, message: `Method ${req.method} not allowed` }, 405);
         }
 
+        // Parse incoming body (defensive)
         const bodyData = parseJSON(req.bodyRaw || req.body || "{}");
         const { amount, currency = "INR", userId, items, shipping = {}, payment_method } = bodyData;
 
@@ -59,7 +63,7 @@ module.exports = async ({ req, res, log, error }) => {
             return res.json({ success: false, message: "Valid amount required" }, 400);
         }
 
-        // Normalize items
+        // Normalize items into an array
         const itemsArr = Array.isArray(items) ? items : items ? [items] : [];
 
         // Build compact summary for Appwrite 'items' attribute (collection expects single string <=999)
@@ -85,6 +89,12 @@ module.exports = async ({ req, res, log, error }) => {
         // Also keep full JSON in items_json (not used for Appwrite attribute validation)
         const items_json = JSON.stringify(itemsArr || []);
 
+        // Ensure items_summary_string presence (schema requires items)
+        if (!items_summary_string || items_summary_string === "[]") {
+            items_summary_string = JSON.stringify([{ name: "unknown", qty: 1 }]).slice(0, 999);
+        }
+
+        // Extract size from first item if present
         const firstItem = itemsArr[0] || null;
         const sizeValue = firstItem && ("size" in firstItem) ? (firstItem.size ?? "N/A") : "N/A";
 
@@ -104,11 +114,20 @@ module.exports = async ({ req, res, log, error }) => {
 
         log("Razorpay order created:", razorpayOrder && razorpayOrder.id);
 
-        // Primary payload: put the compact string into `items` (matching current schema expectation)
+        // --- Ensure shipping and items are stored in schema-friendly types ---
+        let shipping_json = "";
+        try {
+            shipping_json = typeof shipping === "string" ? shipping : JSON.stringify(shipping || {});
+        } catch (e) {
+            shipping_json = "{}";
+        }
+        if (shipping_json.length > 999) shipping_json = shipping_json.slice(0, 999);
+
+        // Prepare primary appwrite document payload (matching collection schema expecting items as string)
         const orderDocPrimary = {
             userId: userId || null,
             size: sizeValue,
-            items: items_summary_string, // single string <=999 chars
+            items: items_summary_string, // single string <=999 chars — ensure present
             items_json,
             amount: amountNumber,
             amountPaise,
@@ -119,23 +138,24 @@ module.exports = async ({ req, res, log, error }) => {
             status: "created",
             receipt,
             payment_method: payment_method || null,
-            shipping_full_name: shipping.full_name || shipping.name || null,
-            shipping_phone: shipping.phone || null,
-            shipping_line_1: shipping.line_1 || shipping.address_line1 || null,
-            shipping_city: shipping.city || null,
-            shipping_postal_code: shipping.postal_code || shipping.zip || null,
-            shipping_country: shipping.country || null,
-            shipping,
+            shipping_full_name: (shipping && (shipping.full_name || shipping.name)) || null,
+            shipping_phone: (shipping && (shipping.phone || shipping.mobile)) || null,
+            shipping_line_1: (shipping && (shipping.line_1 || shipping.address_line1 || shipping.address1)) || null,
+            shipping_city: (shipping && (shipping.city || shipping.town)) || null,
+            shipping_postal_code: (shipping && (shipping.postal_code || shipping.zip || shipping.postcode)) || null,
+            shipping_country: (shipping && shipping.country) || null,
+            // remove shipping object to avoid Appwrite type error; store JSON string instead
+            shipping_json, // safe string representation (truncated to 999)
             verification_raw: null,
             order_id: razorpayOrder.receipt || null,
-            // createdAt: nowISO(),
-            // updatedAt: nowISO(),
+            // createdAt/updatedAt intentionally not added (Appwrite uses $createdAt / $updatedAt)
         };
 
         // Debug log: what we will send (no secrets)
         log("Prepared order document (primary) keys:", Object.keys(orderDocPrimary));
         log("items (type, length):", typeof orderDocPrimary.items, orderDocPrimary.items ? orderDocPrimary.items.length : 0);
         log("items_json length:", orderDocPrimary.items_json ? orderDocPrimary.items_json.length : 0);
+        log("shipping_json (type, length):", typeof orderDocPrimary.shipping_json, orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.length : 0);
 
         const { databases } = createAppwriteClient(req);
         const databaseId = process.env.APPWRITE_DATABASE_ID || "default";
@@ -158,13 +178,17 @@ module.exports = async ({ req, res, log, error }) => {
             log("Primary payload (truncated) was:", JSON.stringify({
                 items_sample: orderDocPrimary.items && orderDocPrimary.items.substring(0, 200),
                 items_len: orderDocPrimary.items ? orderDocPrimary.items.length : 0,
+                shipping_sample: orderDocPrimary.shipping_json && orderDocPrimary.shipping_json.substring(0, 200),
+                shipping_len: orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.length : 0,
             }));
 
-            // fallback attempt: remove `items` attribute and set a different field name (items_summary),
-            // this helps test whether Appwrite rejects the field name itself or just the value/type
+            // fallback attempt: keep `items` (required) but add alternate helper fields
             const orderDocFallback = { ...orderDocPrimary };
-            delete orderDocFallback.items;
-            orderDocFallback.items_summary = items_summary_string; // non-schema name (safe)
+            // DO NOT delete orderDocFallback.items (collection expects it). Instead add helpers:
+            orderDocFallback.items_summary_alt = items_summary_string; // optional helper field
+            // Keep shipping_json in place; add shipping_fallback if needed
+            orderDocFallback.shipping_summary = orderDocFallback.shipping_json && orderDocFallback.shipping_json.substring(0, 500);
+
             const fallbackDocumentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
             try {
@@ -174,7 +198,7 @@ module.exports = async ({ req, res, log, error }) => {
                     success: true,
                     razorpay: { orderId: razorpayOrder.id, amount: razorpayOrder.amount, currency: razorpayOrder.currency, receipt: razorpayOrder.receipt },
                     appwrite: { documentId: createdFallback.$id, used: "fallback_items_summary" },
-                    warning: "Primary create failed; fallback with items_summary succeeded. Consider updating collection schema to accept items as text or rename attribute.",
+                    warning: "Primary create failed; fallback with items_summary_alt succeeded. Consider updating collection schema to accept items as text or rename attribute.",
                     primaryError: createErrMsg,
                 }, 201);
             } catch (fallbackErr) {
@@ -188,6 +212,8 @@ module.exports = async ({ req, res, log, error }) => {
                         items_type: typeof orderDocPrimary.items,
                         items_length: orderDocPrimary.items ? orderDocPrimary.items.length : 0,
                         sample: orderDocPrimary.items ? orderDocPrimary.items.slice(0, 200) : null,
+                        shipping_json_length: orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.length : 0,
+                        shipping_sample: orderDocPrimary.shipping_json ? orderDocPrimary.shipping_json.slice(0, 200) : null,
                         error: createErrMsg,
                     },
                     fallbackAttempt: {
@@ -195,7 +221,7 @@ module.exports = async ({ req, res, log, error }) => {
                         sample: items_summary_string.slice(0, 200),
                         error: fallbackErrMsg,
                     },
-                    guidance: "Check collection schema attributes: name, type, and max length for 'items'. If possible make it text (larger) or optional, or accept objects as JSON strings.",
+                    guidance: "Check collection schema attributes: name, type, and max length for 'items' and 'shipping'. If possible make them text (longer) or optional, or accept objects as JSON strings. Also ensure 'items' is not required if you plan to store alternate field names.",
                 }, 500);
             }
         }
