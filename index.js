@@ -120,7 +120,7 @@ module.exports = async ({ req, res, log, error }) => {
             // receipt_local: receipt,
             //   createdAt: nowISO(),
             //   updatedAt: nowISO(),
-            razorpay_order: razorpayOrder,
+            // razorpay_order: razorpayOrder,
         };
 
         // Save to Appwrite Database
