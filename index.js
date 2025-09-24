@@ -1,5 +1,6 @@
 // createOrder.js (Appwrite Function)
 // - Creates a Razorpay order and saves a corresponding document to Appwrite Database.
+// - Fix: use sdk.ID.unique() to generate document id (avoids "Missing required parameter: documentId").
 
 const Razorpay = require("razorpay");
 const sdk = require("node-appwrite"); // Appwrite Node SDK
@@ -46,19 +47,16 @@ module.exports = async ({ req, res, log, error }) => {
         }
 
         const bodyData = parseJSON(req.bodyRaw || req.body || "{}");
-
-        // Required fields
         const { amount, currency = "INR", userId, items, shipping = {}, payment_method } = bodyData;
 
-        // Validation: amount
         if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
             return res.json({ success: false, message: "Valid amount required" }, 400);
         }
 
-        const amountNumber = Number(amount);
+        const amountNumber = Number(amount); // rupees expected
         const amountPaise = Math.round(amountNumber * 100);
 
-        // Build receipt (you can customize format)
+        // Build receipt
         const receipt = `order_rcpt_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
         // Create Razorpay order
@@ -70,73 +68,61 @@ module.exports = async ({ req, res, log, error }) => {
             amount: amountPaise,
             currency,
             receipt,
-            // optionally: payment_capture: 1 or 0
+            // payment_capture: 1,
         });
 
         log("✅ Razorpay order created:", razorpayOrder && razorpayOrder.id);
 
-        // Build order document for Appwrite (fields from screenshot + extras)
+        // Build order document
         const orderDoc = {
             userId: userId || null,
             items: Array.isArray(items) ? items : items ? [items] : [],
-            // JSON string for compatibility if needed
             items_json: JSON.stringify(items || []),
-            amount: amountNumber,
+            amount: amountNumber, // rupees
             amountPaise,
             currency,
             razorpay_order_id: razorpayOrder.id,
             razorpay_payment_id: null,
             razorpay_signature: null,
-            status: "created", // created -> payment pending. Change after webhook or verify
+            status: "created",
             receipt,
             payment_method: payment_method || null,
-            // shipping fields (expecting shipping: { full_name, phone, line_1, city, postal_code, country } )
             shipping_full_name: shipping.full_name || shipping.name || null,
             shipping_phone: shipping.phone || null,
             shipping_line_1: shipping.line_1 || shipping.address_line1 || null,
             shipping_city: shipping.city || null,
             shipping_postal_code: shipping.postal_code || shipping.zip || null,
             shipping_country: shipping.country || null,
-            shipping: shipping, // store full object as well
-            // any raw verification data from Razorpay or later webhook
+            shipping,
             verification_raw: null,
-            // for compatibility with screenshot
             order_id: razorpayOrder.receipt || null,
             receipt_local: receipt,
-            // metadata & bookkeeping
-            //   createdAt: nowISO(),
-            //   updatedAt: nowISO(),
-            // additional helpful fields:
+            createdAt: nowISO(),
+            updatedAt: nowISO(),
             razorpay_order: razorpayOrder,
         };
 
         // Save to Appwrite Database
-        // Required env vars:
-        // APPWRITE_ENDPOINT, APPWRITE_PROJECT, APPWRITE_API_KEY, APPWRITE_DATABASE_ID, APPWRITE_ORDERS_COLLECTION_ID
-        const {
-            client: appwriteClient,
-            databases,
-        } = createAppwriteClient();
+        const { client: appwriteClient, databases } = createAppwriteClient();
 
         const databaseId = env.APPWRITE_DATABASE_ID || "default";
-        const collectionId = env.APPWRITE_ORDERS_COLLECTION_ID;
+        // NOTE: env var name should match what's set in your function settings
+        const collectionId = env.APPWRITE_ORDERS_COLLECTION_ID || env.ORDERS_COLLECTION_ID;
         if (!collectionId) {
-            error("Missing APPWRITE_ORDERS_COLLECTION_ID env var");
-            return res.json({ success: false, message: "Server misconfiguration: APPWRITE_ORDERS_COLLECTION_ID missing" }, 500);
+            error("Missing APPWRITE_ORDERS_COLLECTION_ID or ORDERS_COLLECTION_ID env var");
+            return res.json({ success: false, message: "Server misconfiguration: orders collection id missing" }, 500);
         }
 
         log("Saving order to Appwrite:", { databaseId, collectionId });
 
-        const createdDoc = await databases.createDocument(
-            databaseId,
-            collectionId,
-            undefined, // let Appwrite generate id
-            orderDoc
-        );
+        // IMPORTANT: use sdk.ID.unique() to auto-generate an id
+        const documentId = sdk.ID.unique();
+
+        // createDocument(databaseId, collectionId, documentId, data, read = [], write = [])
+        const createdDoc = await databases.createDocument(databaseId, collectionId, documentId, orderDoc);
 
         log("✅ Order saved to Appwrite:", createdDoc.$id);
 
-        // Return useful info to client
         return res.json(
             {
                 success: true,
