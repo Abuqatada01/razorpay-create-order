@@ -106,6 +106,114 @@ module.exports = async ({ req, res, log, error }) => {
         const amountPaise = Math.round(amountNumber * 100);
         const receipt = `order_rcpt_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
+        // sanitize postal code — only include if valid integer
+        const shipping_postal_code_int = sanitizePostalCode(
+            shipping && (shipping.postal_code || shipping.zip || shipping.postal || shipping.postcode)
+        );
+
+        // shipping json truncated
+        let shipping_json = "";
+        try {
+            shipping_json = typeof shipping === "string" ? shipping : JSON.stringify(shipping || {});
+        } catch (e) {
+            shipping_json = "{}";
+        }
+        if (shipping_json.length > 999) shipping_json = shipping_json.slice(0, 999);
+
+        // Prepare sanitized fields for Appwrite doc
+        const allowedBase = {
+            userId: userId || null,
+            size: sizeValue,
+            items: items_summary_string,
+            items_json: items_json,
+            amount: amountNumber,
+            amountPaise,
+            currency,
+            razorpay_order_id: null,
+            razorpay_payment_id: null,
+            razorpay_signature: null,
+            status: "created", // may be overridden below
+            receipt,
+            payment_method: payment_method || null,
+            shipping_full_name: (shipping && (shipping.full_name || shipping.name)) || null,
+            shipping_phone: (shipping && (shipping.phone || shipping.mobile)) || null,
+            shipping_line_1: (shipping && (shipping.line_1 || shipping.address_line1 || shipping.address1)) || null,
+            shipping_city: (shipping && (shipping.city || shipping.town)) || null,
+            shipping_country: (shipping && shipping.country) || null,
+            shipping_json,
+            verification_raw: null,
+            order_id: null,
+        };
+
+        // Only set shipping_postal_code if it's valid integer
+        if (typeof shipping_postal_code_int === "number" && Number.isInteger(shipping_postal_code_int)) {
+            allowedBase.shipping_postal_code = shipping_postal_code_int;
+        }
+
+        // Create Appwrite client
+        const { databases } = createAppwriteClient(req);
+        const databaseId = process.env.APPWRITE_DATABASE_ID || "default";
+        const collectionId = process.env.APPWRITE_ORDERS_COLLECTION_ID || process.env.ORDERS_COLLECTION_ID;
+        const documentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+
+        // If payment method is COD — skip Razorpay and directly create doc with COD status
+        if (String(payment_method).toLowerCase() === "cod") {
+            try {
+                allowedBase.status = "cod_pending";
+                allowedBase.order_id = receipt;
+                // razorpay fields remain null
+                const sanitizedDoc = {};
+                Object.keys(allowedBase).forEach((k) => {
+                    if (allowedBase[k] !== undefined) sanitizedDoc[k] = allowedBase[k];
+                });
+
+                // create doc in Appwrite
+                const created = await databases.createDocument(databaseId, collectionId, documentId, sanitizedDoc);
+                log("COD Order saved to Appwrite:", created.$id);
+
+                return res.json({
+                    success: true,
+                    payment_method: "cod",
+                    orderId: created.$id,
+                    appwrite: { documentId: created.$id, used: "primary" },
+                    message: "Order created (Cash on Delivery).",
+                }, 201);
+            } catch (createErr) {
+                const createErrMsg = createErr && createErr.message ? String(createErr.message) : String(createErr);
+                error("Appwrite createDocument (COD) failed: " + createErrMsg);
+
+                // fallback attempt
+                const fallbackId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+                try {
+                    const sanitizedDoc = {};
+                    Object.keys(allowedBase).forEach((k) => {
+                        if (allowedBase[k] !== undefined) sanitizedDoc[k] = allowedBase[k];
+                    });
+                    const createdFallback = await databases.createDocument(databaseId, collectionId, fallbackId, sanitizedDoc);
+                    log("COD Order saved to Appwrite (fallback):", createdFallback.$id);
+                    return res.json({
+                        success: true,
+                        payment_method: "cod",
+                        orderId: createdFallback.$id,
+                        appwrite: { documentId: createdFallback.$id, used: "fallback_same_payload" },
+                        warning: "Primary create failed; fallback succeeded using sanitized payload.",
+                        primaryError: createErrMsg,
+                    }, 201);
+                } catch (fallbackErr) {
+                    const fallbackErrMsg = fallbackErr && fallbackErr.message ? String(fallbackErr.message) : String(fallbackErr);
+                    error("Appwrite createDocument (COD fallback) failed: " + fallbackErrMsg);
+                    return res.json({
+                        success: false,
+                        error: "Appwrite createDocument failed for both primary and fallback attempts (COD).",
+                        primaryAttempt: { error: createErrMsg },
+                        fallbackAttempt: { error: fallbackErrMsg },
+                        guidance: "Verify collection schema allows these exact fields and types.",
+                    }, 500);
+                }
+            }
+        }
+
+        // OTHERWISE: existing Razorpay creation (unchanged)
         const razorpay = createRazorpayClient(process.env);
         log("Creating Razorpay order", { amountPaise, currency, receipt });
 
@@ -117,50 +225,11 @@ module.exports = async ({ req, res, log, error }) => {
 
         log("Razorpay order created:", razorpayOrder && razorpayOrder.id);
 
-        // shipping json truncated
-        let shipping_json = "";
-        try {
-            shipping_json = typeof shipping === "string" ? shipping : JSON.stringify(shipping || {});
-        } catch (e) {
-            shipping_json = "{}";
-        }
-        if (shipping_json.length > 999) shipping_json = shipping_json.slice(0, 999);
-
-        // sanitize postal code — only include if valid integer
-        const shipping_postal_code_int = sanitizePostalCode(
-            shipping && (shipping.postal_code || shipping.zip || shipping.postal || shipping.postcode)
-        );
-
-        // Build a whitelist of allowed fields for Appwrite document
-        const allowed = {
-            userId: userId || null,
-            size: sizeValue,
-            items: items_summary_string,
-            items_json: items_json,
-            amount: amountNumber,
-            amountPaise,
-            currency,
-            razorpay_order_id: razorpayOrder.id,
-            razorpay_payment_id: null,
-            razorpay_signature: null,
-            status: "created",
-            receipt,
-            payment_method: payment_method || null,
-            shipping_full_name: (shipping && (shipping.full_name || shipping.name)) || null,
-            shipping_phone: (shipping && (shipping.phone || shipping.mobile)) || null,
-            shipping_line_1: (shipping && (shipping.line_1 || shipping.address_line1 || shipping.address1)) || null,
-            shipping_city: (shipping && (shipping.city || shipping.town)) || null,
-            // shipping_postal_code intentionally added only if valid integer below
-            shipping_country: (shipping && shipping.country) || null,
-            shipping_json,
-            verification_raw: null,
-            order_id: razorpayOrder.receipt || null,
-        };
-
-        // Only set shipping_postal_code if it's valid integer
-        if (typeof shipping_postal_code_int === "number" && Number.isInteger(shipping_postal_code_int)) {
-            allowed.shipping_postal_code = shipping_postal_code_int;
-        }
+        // Write doc to Appwrite with razorpay fields and created status
+        const allowed = Object.assign({}, allowedBase);
+        allowed.razorpay_order_id = razorpayOrder.id;
+        allowed.order_id = razorpayOrder.receipt || receipt;
+        allowed.status = "created";
 
         // Build sanitizedDoc with only defined keys (drop undefined)
         const sanitizedDoc = {};
@@ -168,18 +237,12 @@ module.exports = async ({ req, res, log, error }) => {
             if (allowed[k] !== undefined) sanitizedDoc[k] = allowed[k];
         });
 
-        // Debug log sanitizedDoc keys and lightweight samples (no secrets)
         log("Sanitized document prepared for Appwrite:", {
             keys: Object.keys(sanitizedDoc),
             items_len: sanitizedDoc.items ? sanitizedDoc.items.length : 0,
             shipping_json_len: sanitizedDoc.shipping_json ? sanitizedDoc.shipping_json.length : 0,
             shipping_postal_code: sanitizedDoc.shipping_postal_code,
         });
-
-        const { databases } = createAppwriteClient(req);
-        const databaseId = process.env.APPWRITE_DATABASE_ID || "default";
-        const collectionId = process.env.APPWRITE_ORDERS_COLLECTION_ID || process.env.ORDERS_COLLECTION_ID;
-        const documentId = sdk.ID && sdk.ID.unique ? sdk.ID.unique() : `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
         // Try primary create
         try {
@@ -224,6 +287,7 @@ module.exports = async ({ req, res, log, error }) => {
                 }, 500);
             }
         }
+
     } catch (err) {
         error("Critical error: " + (err && err.message ? err.message : String(err)));
         return res.json({ success: false, error: err && err.message ? err.message : String(err) }, 500);
