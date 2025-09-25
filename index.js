@@ -159,7 +159,7 @@ module.exports = async ({ req, res, log, error }) => {
         // If payment method is COD — skip Razorpay and directly create doc with COD status
         if (String(payment_method).toLowerCase() === "cod") {
             try {
-                allowedBase.status = "cod_pending";
+                allowedBase.status = "COD";
                 allowedBase.order_id = receipt;
                 // razorpay fields remain null
                 const sanitizedDoc = {};
